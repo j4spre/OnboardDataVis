@@ -1,0 +1,48 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "onboard-datavis"
+dynamic = ["version"]
+description = "Telemetry overlays for onboard racing video – RaceBox, CSV, MF4, VBO and GPX data, auto-sync and FFmpeg export."
+readme = "README.md"
+license = { text = "GPL-3.0-or-later" }
+authors = [{ name = "Jasper", email = "jschoelerasper@gmail.com" }]
+requires-python = ">=3.10"
+keywords = ["motorsport", "telemetry", "racebox", "mf4", "overlay", "onboard", "video", "formula-student"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
+    "Operating System :: OS Independent",
+    "Topic :: Multimedia :: Video",
+    "Environment :: X11 Applications :: Qt",
+]
+dependencies = [
+    "PySide6>=6.6",
+    "numpy>=1.24",
+    "pandas>=2.0",
+    "scipy>=1.10",
+    "asammdf>=7.4",
+    "av>=11.0",
+    "opencv-python-headless>=4.8",
+    "imageio-ffmpeg>=0.4.9",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[project.scripts]
+onboard-datavis = "odv.__main__:main"
+
+[tool.setuptools.dynamic]
+version = { attr = "odv.__version__" }
+
+[tool.setuptools.packages.find]
+include = ["odv*"]
+
+[tool.setuptools.package-data]
+odv = ["assets/*.png", "assets/*.ico", "assets/fonts/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
