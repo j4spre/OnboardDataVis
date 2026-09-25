@@ -11,10 +11,30 @@ from .data.loaders import load_any
 from .data.model import Session
 from .render.widgets import (DeltaBar, GCircle, Graph, LapTimer, Pedals, SpeedDial, Steering, TrackMap,
                              ValueBox, BarGauge, Widget, widget_from_json)
-from .video import VideoInfo, probe
+from .video import VideoInfo, VideoTransform, display_size, probe
 
 REF_WIDTH = 1920.0
 FORMAT_VERSION = 1
+OVERLAY_FORMAT = "onboard-datavis-overlay"
+
+
+def _file_props(w: Widget):
+    return [p.name for p in w.all_props() if p.kind == "file"]
+
+
+def _rel(path: str, base: Optional[str]) -> str:
+    if path and base and os.path.isabs(path):
+        try:
+            return os.path.relpath(path, base)
+        except ValueError:  # other drive on Windows
+            return path
+    return path
+
+
+def _abs(path: str, base: Optional[str]) -> str:
+    if path and base and not os.path.isabs(path):
+        return os.path.normpath(os.path.join(base, path))
+    return path
 
 
 class Project:
@@ -32,14 +52,35 @@ class Project:
         self.link_offsets = True
         self.primary_source: Optional[str] = None
         self.export = dict(resolution="source", encoder="auto", quality="high", audio=True)
+        self.video_tf = VideoTransform()
         self.dirty = False
 
     # ------------------------------------------------------------------ geometry
     @property
     def ref_height(self) -> float:
         if self.video and self.video.width:
-            return REF_WIDTH * self.video.height / self.video.width
+            w, h = self.display_size()
+            return REF_WIDTH * h / w
         return 1080.0
+
+    def set_video_transform(self, **kw):
+        """Change rotation / mirroring / levelling; keeps bottom-anchored widgets at the bottom."""
+        old_h = self.ref_height
+        for k, v in kw.items():
+            setattr(self.video_tf, k, v)
+        new_h = self.ref_height
+        if abs(new_h - old_h) > 1:
+            for w in self.widgets:
+                if w.y + w.h / 2 > old_h / 2:
+                    w.y += new_h - old_h
+                w.y = max(0.0, min(w.y, new_h - min(w.h, new_h)))
+        self.dirty = True
+
+    def display_size(self):
+        """Video size after display-matrix rotation and the user's orientation fix."""
+        if not self.video:
+            return 1920, 1080
+        return display_size(self.video, self.video_tf)
 
     # ------------------------------------------------------------------ media
     def set_video(self, path: str):
@@ -139,9 +180,100 @@ class Project:
             video=rel(self.video.path) if self.video else None,
             sources=[dict(s.to_json(), path=rel(s.path)) for s in self.session.sources],
             roles=self.session.roles, primary=self.primary_source, link_offsets=self.link_offsets,
-            widgets=[w.to_json() for w in self.widgets], theme=self.theme, accent=self.accent,
+            widgets=[self._widget_json(w, base) for w in self.widgets], theme=self.theme, accent=self.accent,
             speed_unit=self.speed_unit, trim=[self.trim_in, self.trim_out], export=self.export,
+            video_transform=self.video_tf.to_json(),
         )
+
+    @staticmethod
+    def _widget_json(w: Widget, base: Optional[str]) -> dict:
+        d = w.to_json()
+        for k in _file_props(w):
+            d["props"][k] = _rel(d["props"].get(k, ""), base)
+        return d
+
+    # ------------------------------------------------------------------ overlay configuration
+    def overlay_json(self, base: Optional[str] = None) -> dict:
+        """Everything that defines the look, independent of video and data files."""
+        roles = {}
+        for role, key in self.session.roles.items():
+            src, ch = self.session.resolve(key)
+            name = ch.name if ch is not None else key.split(":", 1)[-1]
+            roles[role] = dict(key=key, name=name, kind=src.kind if src is not None else "")
+        sources = {s.id: dict(kind=s.kind, name=s.name) for s in self.session.sources}
+        return dict(format=OVERLAY_FORMAT, version=1, ref_width=REF_WIDTH, ref_height=self.ref_height,
+                    theme=self.theme, accent=self.accent, speed_unit=self.speed_unit,
+                    widgets=[self._widget_json(w, base) for w in self.widgets], roles=roles, sources=sources)
+
+    def save_overlay(self, path: str):
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(self.overlay_json(os.path.dirname(os.path.abspath(path))), f, indent=2)
+
+    def remap_key(self, key: str, saved_sources: dict) -> str:
+        """Point a saved "sid:name" reference at the matching channel in this project, if any."""
+        if not key or key.startswith("@") or ":" not in key:
+            return key
+        sid, name = key.split(":", 1)
+        sess = self.session
+        kind = (saved_sources.get(sid) or {}).get("kind", "")
+        src = sess.source(sid)
+        if src is not None and src.has(name) and (not kind or src.kind == kind):
+            return key
+        # same kind of source first, then anything with that channel name
+        same_kind = [s for s in sess.sources if kind and s.kind == kind]
+        for s in same_kind:
+            if s.has(name):
+                return f"{s.id}:{name}"
+        found = sess.find_by_name(name, sid)
+        if found:
+            return f"{found[0].id}:{found[1]}"
+        return key  # keep; it re-matches by name when matching data is added
+
+    def load_overlay(self, path: str, replace: bool = True) -> dict:
+        with open(path, "r", encoding="utf-8") as f:
+            d = json.load(f)
+        if d.get("format") not in (OVERLAY_FORMAT, "onboard-datavis"):
+            raise ValueError("Not an Onboard DataVis overlay file")
+        base = os.path.dirname(os.path.abspath(path))
+        saved_sources = d.get("sources") or {}
+        old_h = float(d.get("ref_height") or self.ref_height)
+        new_h = self.ref_height
+        widgets = []
+        for wd in d.get("widgets", []):
+            w = widget_from_json(wd)
+            if w is None:
+                continue
+            for p in w.all_props():
+                if p.kind == "channel" and w.props.get(p.name):
+                    w.props[p.name] = self.remap_key(w.props[p.name], saved_sources)
+                elif p.kind == "file":
+                    w.props[p.name] = _abs(w.props.get(p.name, ""), base)
+            if abs(old_h - new_h) > 1 and w.y + w.h / 2 > old_h / 2:
+                w.y += new_h - old_h  # keep bottom-anchored widgets at the bottom
+            if not replace:
+                import uuid
+
+                w.id = uuid.uuid4().hex[:8]
+            widgets.append(w)
+        # roles: take the overlay's mapping where it matches data here; keep unmatched ones pending
+        for role, info in (d.get("roles") or {}).items():
+            key = info.get("key", "") if isinstance(info, dict) else str(info)
+            nk = self.remap_key(key, saved_sources)
+            if self.session.resolve(nk)[1] is not None or not self.session.resolve_ref("@" + role)[1]:
+                self.session.roles[role] = nk
+        self.session.invalidate()
+        self.widgets = widgets if replace else self.widgets + widgets
+        if replace:
+            self.theme = d.get("theme", self.theme)
+            self.accent = d.get("accent", self.accent)
+            self.speed_unit = d.get("speed_unit", self.speed_unit)
+        self.rebuild_laps()
+        self.dirty = True
+        missing = sorted({r for w in widgets for r in w.missing_channels(self.session)})
+        return dict(widgets=len(widgets), missing=missing)
+
+    def missing_channels(self) -> List[str]:
+        return sorted({r for w in self.widgets for r in w.missing_channels(self.session)})
 
     def save(self, path: Optional[str] = None):
         if path:
@@ -176,11 +308,15 @@ class Project:
         pr.primary_source = d.get("primary") or (pr.session.sources[0].id if pr.session.sources else None)
         pr.link_offsets = d.get("link_offsets", True)
         pr.widgets = [w for w in (widget_from_json(x) for x in d.get("widgets", [])) if w is not None]
+        for w in pr.widgets:
+            for k in _file_props(w):
+                w.props[k] = _abs(w.props.get(k, ""), base)
         pr.theme = d.get("theme", "Broadcast")
         pr.accent = d.get("accent", "")
         pr.speed_unit = d.get("speed_unit", "km/h")
         pr.trim_in, pr.trim_out = (d.get("trim") or [0, 0])[:2]
         pr.export.update(d.get("export") or {})
+        pr.video_tf = VideoTransform.from_json(d.get("video_transform"))
         pr.rebuild_laps()
         pr.dirty = False
         return pr

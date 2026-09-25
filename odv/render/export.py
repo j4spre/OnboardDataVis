@@ -144,8 +144,11 @@ class Exporter:
 
         dec = None
         if not s.transparent:
-            dec_cmd = [exe, "-hide_banner", "-v", "error", "-ss", f"{s.t_in:.6f}", "-i", vi.path, "-t", f"{dur:.6f}",
-                       "-map", "0:v:0", "-vf", f"scale={W}:{H}:flags=bicubic", "-r", fps_str, "-pix_fmt", "bgra",
+            from ..video import ffmpeg_orient_filters
+
+            vf = ",".join(ffmpeg_orient_filters(vi, pr.video_tf) + [f"scale={W}:{H}:flags=bicubic"])
+            dec_cmd = [exe, "-hide_banner", "-v", "error", "-noautorotate", "-ss", f"{s.t_in:.6f}", "-i", vi.path,
+                       "-t", f"{dur:.6f}", "-map", "0:v:0", "-vf", vf, "-r", fps_str, "-pix_fmt", "bgra",
                        "-f", "rawvideo", "-"]
             dec = subprocess.Popen(dec_cmd, stdout=subprocess.PIPE, stderr=log, creationflags=_NO_WINDOW,
                                    bufsize=W * H * 4 * 2)
@@ -183,6 +186,10 @@ class Exporter:
                         break
                     raw = bytearray(buf)
                     img = QImage(raw, W, H, W * 4, QImage.Format.Format_ARGB32)
+                    if abs(pr.video_tf.angle) > 1e-6:
+                        from ..video import fine_rotate
+
+                        img = fine_rotate(img, pr.video_tf.angle, pr.video_tf.fill)
                 else:
                     if i >= n_total:
                         break

@@ -1,13 +1,11 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Overlay widgets (gauges). All drawing happens in *reference* coordinates
-(1920 px wide canvas); the renderer scales the painter to the output size."""
+"""Overlay widgets. Motorsport-specific gauges live here; generic data widgets are in
+:mod:`widgets_data`, media layers (text, image, blur) in :mod:`widgets_media`."""
 from __future__ import annotations
 
 import math
 import os
-import uuid
-from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Optional
 
 import numpy as np
 from PySide6.QtCore import QPointF, QRectF, Qt
@@ -15,143 +13,9 @@ from PySide6.QtGui import (QBrush, QColor, QConicalGradient, QImage, QLinearGrad
                            QPainterPath, QPen, QPolygonF, QRadialGradient)
 
 from ..data.laps import fmt_laptime
+from .base import (COMMON, RANGE, SIGNAL, SPEED_UNITS, VALUE, Prop, RenderContext, ValueWidget, Widget,  # noqa: F401
+                   convert, fmt_num, nice_ceil, nice_range)
 from .theme import Theme, draw_panel, draw_text, glow_pen, lerp_color, text_width
-
-SPEED_UNITS = {"km/h": 3.6, "mph": 2.2369363, "m/s": 1.0, "kn": 1.9438445}
-
-
-def convert(value, from_unit: str, to_unit: str):
-    if not to_unit or to_unit == from_unit:
-        return value
-    if from_unit == "m/s" and to_unit in SPEED_UNITS:
-        return value * SPEED_UNITS[to_unit]
-    if from_unit == "km/h" and to_unit in SPEED_UNITS:
-        return value / 3.6 * SPEED_UNITS[to_unit]
-    return value
-
-
-def nice_ceil(x: float) -> float:
-    if not np.isfinite(x) or x <= 0:
-        return 1.0
-    e = 10 ** math.floor(math.log10(x))
-    for m in (1, 1.2, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10):
-        if m * e >= x:
-            return m * e
-    return 10 * e
-
-
-def fmt_num(v, decimals=0) -> str:
-    if v is None or not np.isfinite(v):
-        return "--"
-    return f"{v:.{decimals}f}"
-
-
-# ------------------------------------------------------------------ context
-
-class RenderContext:
-    def __init__(self, session, laps, theme: Theme, t: float, speed_unit: str = "km/h"):
-        self.session = session
-        self.laps = laps
-        self.theme = theme
-        self.t = t
-        self.speed_unit = speed_unit
-        self._range_cache: Dict[str, Tuple[float, float]] = {}
-
-    def unit(self, ref: str) -> str:
-        return self.session.unit_of(ref) if self.session else ""
-
-    def val(self, ref: str, unit: str = "") -> float:
-        if not ref or self.session is None:
-            return float("nan")
-        v = self.session.value(ref, self.t)
-        return convert(v, self.unit(ref), unit)
-
-    def series(self, ref: str, times: np.ndarray, unit: str = "") -> np.ndarray:
-        if not ref or self.session is None:
-            return np.full(len(times), np.nan)
-        v = self.session.value(ref, times)
-        return convert(v, self.unit(ref), unit)
-
-    def auto_range(self, ref: str, unit: str = "") -> Tuple[float, float]:
-        key = ref + "|" + unit
-        if key not in self._range_cache:
-            src, ch = self.session.resolve_ref(ref) if self.session else (None, None)
-            if ch is None:
-                rng = (0.0, 1.0)
-            else:
-                st = ch.stats()
-                rng = (convert(st["p01"], ch.unit, unit), convert(st["p99"], ch.unit, unit))
-            self._range_cache[key] = rng
-        return self._range_cache[key]
-
-
-# ------------------------------------------------------------------ props
-
-@dataclass
-class Prop:
-    name: str
-    kind: str  # channel | float | int | bool | color | choice | text | file
-    default: Any
-    label: str = ""
-    options: Optional[List[str]] = None
-    minv: float = -1e9
-    maxv: float = 1e9
-
-
-COMMON = [
-    Prop("visible", "bool", True, "Visible"),
-    Prop("opacity", "float", 1.0, "Opacity", minv=0.0, maxv=1.0),
-    Prop("panel", "bool", True, "Background panel"),
-    Prop("accent", "color", "", "Accent colour (blank = theme)"),
-]
-
-
-class Widget:
-    TYPE = "base"
-    NAME = "Widget"
-    PROPS: List[Prop] = []
-    DEFAULT_SIZE = (300, 200)
-
-    def __init__(self, x=0.0, y=0.0, w=None, h=None, props: Optional[dict] = None, wid: Optional[str] = None):
-        self.id = wid or uuid.uuid4().hex[:8]
-        self.x, self.y = float(x), float(y)
-        self.w = float(w if w is not None else self.DEFAULT_SIZE[0])
-        self.h = float(h if h is not None else self.DEFAULT_SIZE[1])
-        self.props: Dict[str, Any] = {p.name: p.default for p in self.all_props()}
-        if props:
-            self.props.update(props)
-
-    @classmethod
-    def all_props(cls) -> List[Prop]:
-        return COMMON + cls.PROPS
-
-    @property
-    def rect(self) -> QRectF:
-        return QRectF(self.x, self.y, self.w, self.h)
-
-    def accent(self, theme: Theme) -> QColor:
-        c = self.props.get("accent")
-        return QColor(c) if c else theme.accent
-
-    def panel(self, p, r, theme, radius=None):
-        if self.props.get("panel", True):
-            draw_panel(p, r, theme, radius)
-
-    def paint(self, p: QPainter, ctx: RenderContext):
-        if not self.props.get("visible", True):
-            return
-        p.save()
-        p.setOpacity(float(self.props.get("opacity", 1.0)))
-        try:
-            self.draw(p, self.rect, ctx)
-        finally:
-            p.restore()
-
-    def draw(self, p: QPainter, r: QRectF, ctx: RenderContext):  # pragma: no cover - abstract
-        raise NotImplementedError
-
-    def to_json(self) -> dict:
-        return dict(type=self.TYPE, id=self.id, x=self.x, y=self.y, w=self.w, h=self.h, props=self.props)
 
 
 # ------------------------------------------------------------------ speed dial
@@ -247,97 +111,6 @@ class SpeedDial(Widget):
         label = pr["label"] or (unit or ctx.unit(pr["channel"])).upper()
         draw_text(p, QRectF(c.x() - side / 2, c.y() + side * 0.17, side, side * 0.1), label, th, side * 0.075,
                   th.text_dim, glow=False)
-
-
-# ------------------------------------------------------------------ numeric value
-
-class ValueBox(Widget):
-    TYPE, NAME = "value", "Value"
-    DEFAULT_SIZE = (220, 110)
-    PROPS = [
-        Prop("channel", "channel", "@speed", "Channel"),
-        Prop("label", "text", "SPEED", "Label"),
-        Prop("unit", "text", "km/h", "Unit (speed units convert)"),
-        Prop("decimals", "int", 0, "Decimals", minv=0, maxv=4),
-        Prop("scale", "float", 1.0, "Multiply by"),
-        Prop("add", "float", 0.0, "Add"),
-    ]
-
-    def draw(self, p, r, ctx):
-        th, pr = ctx.theme, self.props
-        self.panel(p, r, th)
-        v = ctx.val(pr["channel"], pr["unit"] if pr["unit"] in SPEED_UNITS else "")
-        v = v * pr["scale"] + pr["add"]
-        pad = r.height() * 0.1
-        draw_text(p, QRectF(r.left() + pad * 1.4, r.top() + pad, r.width(), r.height() * 0.25), pr["label"].upper(),
-                  th, r.height() * 0.2, th.text_dim, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop, glow=False)
-        txt = fmt_num(v, int(pr["decimals"]))
-        vr = QRectF(r.left() + pad * 1.4, r.top() + r.height() * 0.35, r.width() - pad * 2.8, r.height() * 0.55)
-        uw = 0
-        if pr["unit"]:
-            uw = text_width(th, r.height() * 0.2, pr["unit"]) + pad
-            draw_text(p, QRectF(vr.right() - uw + pad, vr.top(), uw, vr.height() * 0.95), pr["unit"], th,
-                      r.height() * 0.2, th.text_dim, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom,
-                      glow=False)
-        draw_text(p, QRectF(vr.left(), vr.top(), vr.width() - uw, vr.height()), txt, th, r.height() * 0.5, th.text,
-                  Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-
-
-# ------------------------------------------------------------------ bar
-
-class BarGauge(Widget):
-    TYPE, NAME = "bar", "Bar"
-    DEFAULT_SIZE = (320, 70)
-    PROPS = [
-        Prop("channel", "channel", "@soc", "Channel"),
-        Prop("label", "text", "SOC", "Label"),
-        Prop("unit", "text", "%", "Unit suffix"),
-        Prop("min", "float", 0.0, "Min"),
-        Prop("max", "float", 0.0, "Max (0 = auto)"),
-        Prop("decimals", "int", 0, "Decimals", minv=0, maxv=3),
-        Prop("scale", "float", 1.0, "Multiply by"),
-        Prop("vertical", "bool", False, "Vertical"),
-    ]
-
-    def draw(self, p, r, ctx):
-        th, pr = ctx.theme, self.props
-        self.panel(p, r, th)
-        v = ctx.val(pr["channel"]) * pr["scale"]
-        lo = pr["min"]
-        hi = pr["max"] or nice_ceil(ctx.auto_range(pr["channel"])[1] * pr["scale"])
-        f = 0.0 if not np.isfinite(v) or hi == lo else max(0.0, min(1.0, (v - lo) / (hi - lo)))
-        acc = self.accent(th)
-        pad = min(r.width(), r.height()) * 0.16
-        if not pr["vertical"]:
-            lab_h = r.height() * 0.32
-            draw_text(p, QRectF(r.left() + pad, r.top() + pad * 0.7, r.width() / 2, lab_h), pr["label"].upper(), th,
-                      lab_h * 0.8, th.text_dim, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, glow=False)
-            draw_text(p, QRectF(r.left(), r.top() + pad * 0.7, r.width() - pad, lab_h),
-                      fmt_num(v, int(pr["decimals"])) + pr["unit"], th, lab_h * 0.95, th.text,
-                      Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            bar = QRectF(r.left() + pad, r.bottom() - pad - r.height() * 0.22, r.width() - 2 * pad, r.height() * 0.22)
-            fill = QRectF(bar.left(), bar.top(), bar.width() * f, bar.height())
-        else:
-            lab_h = r.width() * 0.3
-            draw_text(p, QRectF(r.left(), r.bottom() - pad - lab_h, r.width(), lab_h), pr["label"].upper(), th,
-                      lab_h * 0.7, th.text_dim, glow=False)
-            draw_text(p, QRectF(r.left(), r.top() + pad * 0.5, r.width(), lab_h), fmt_num(v, int(pr["decimals"])),
-                      th, lab_h * 0.8, th.text)
-            bar = QRectF(r.center().x() - r.width() * 0.18, r.top() + pad + lab_h, r.width() * 0.36,
-                         r.height() - 2 * pad - 2 * lab_h)
-            fill = QRectF(bar.left(), bar.bottom() - bar.height() * f, bar.width(), bar.height() * f)
-        p.save()
-        p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(th.track)
-        rad = min(bar.width(), bar.height()) / 2
-        p.drawRoundedRect(bar, rad, rad)
-        if f > 0:
-            g = QLinearGradient(bar.topLeft(), bar.topRight() if not pr["vertical"] else bar.bottomLeft())
-            g.setColorAt(0, lerp_color(acc, QColor(255, 255, 255), 0.25))
-            g.setColorAt(1, acc)
-            p.setBrush(g)
-            p.drawRoundedRect(fill, rad, rad)
-        p.restore()
 
 
 # ------------------------------------------------------------------ pedals
@@ -480,6 +253,7 @@ class GCircle(Widget):
 # ------------------------------------------------------------------ track map
 
 class TrackMap(Widget):
+    USES_DATA = False
     TYPE, NAME = "track_map", "Track map"
     DEFAULT_SIZE = (360, 360)
     PROPS = [
@@ -627,6 +401,7 @@ class TrackMap(Widget):
 # ------------------------------------------------------------------ lap timer
 
 class LapTimer(Widget):
+    USES_DATA = False
     TYPE, NAME = "lap_timer", "Lap timer"
     DEFAULT_SIZE = (430, 190)
     PROPS = [
@@ -694,6 +469,7 @@ class LapTimer(Widget):
 # ------------------------------------------------------------------ delta bar
 
 class DeltaBar(Widget):
+    USES_DATA = False
     TYPE, NAME = "delta", "Delta to best"
     DEFAULT_SIZE = (430, 70)
     PROPS = [
@@ -730,68 +506,6 @@ class DeltaBar(Widget):
             p.drawRoundedRect(fr, bar.height() / 2, bar.height() / 2)
         p.setBrush(th.text)
         p.drawRect(QRectF(cx - 1.5, bar.top() - H * 0.1, 3, bar.height() + H * 0.2))
-        p.restore()
-
-
-# ------------------------------------------------------------------ rolling graph
-
-class Graph(Widget):
-    TYPE, NAME = "graph", "Rolling graph"
-    DEFAULT_SIZE = (560, 160)
-    PROPS = [
-        Prop("ch1", "channel", "@speed", "Channel 1"),
-        Prop("ch2", "channel", "@throttle", "Channel 2"),
-        Prop("ch3", "channel", "@brake", "Channel 3"),
-        Prop("window", "float", 10.0, "Window (s)", minv=1, maxv=120),
-        Prop("color1", "color", "", "Colour 1 (blank = accent)"),
-        Prop("color2", "color", "", "Colour 2 (blank = throttle)"),
-        Prop("color3", "color", "", "Colour 3 (blank = brake)"),
-        Prop("label", "text", "", "Label"),
-    ]
-
-    def draw(self, p, r, ctx):
-        th, pr = ctx.theme, self.props
-        self.panel(p, r, th)
-        pad = min(r.width(), r.height()) * 0.1
-        area = r.adjusted(pad, pad, -pad, -pad)
-        if pr["label"]:
-            draw_text(p, QRectF(area.left(), area.top(), area.width(), r.height() * 0.15), pr["label"].upper(), th,
-                      r.height() * 0.11, th.text_dim, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop, glow=False)
-        p.save()
-        p.setPen(QPen(th.track, 1))
-        for k in range(1, 4):
-            y = area.top() + area.height() * k / 4
-            p.drawLine(QPointF(area.left(), y), QPointF(area.right(), y))
-        n = 160
-        ts = ctx.t - np.linspace(pr["window"], 0, n)
-        defaults = [self.accent(th), th.throttle, th.brake]
-        for i in range(3):
-            ref = pr[f"ch{i + 1}"]
-            if not ref:
-                continue
-            v = ctx.series(ref, ts)
-            lo, hi = ctx.auto_range(ref)
-            if hi <= lo:
-                hi = lo + 1
-            f = np.clip((v - lo) / (hi - lo), 0, 1)
-            col = QColor(pr[f"color{i + 1}"]) if pr[f"color{i + 1}"] else defaults[i]
-            path = QPainterPath()
-            started = False
-            for k in range(n):
-                if not np.isfinite(f[k]):
-                    started = False
-                    continue
-                pt = QPointF(area.left() + area.width() * k / (n - 1), area.bottom() - area.height() * f[k])
-                if started:
-                    path.lineTo(pt)
-                else:
-                    path.moveTo(pt)
-                    started = True
-            if th.glow:
-                p.setPen(glow_pen(col, 7, 50))
-                p.drawPath(path)
-            p.setPen(QPen(col, 3, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
-            p.drawPath(path)
         p.restore()
 
 
@@ -848,64 +562,34 @@ class Steering(Widget):
                       th.text)
 
 
-# ------------------------------------------------------------------ static
+# ------------------------------------------------------------------ registry
 
-class TextLabel(Widget):
-    TYPE, NAME = "text", "Text"
-    DEFAULT_SIZE = (400, 70)
-    PROPS = [
-        Prop("text", "text", "DRIVER NAME", "Text"),
-        Prop("size", "float", 0.6, "Size (fraction of height)", minv=0.1, maxv=1),
-        Prop("align", "choice", "left", "Align", ["left", "center", "right"]),
-        Prop("color", "color", "", "Colour (blank = theme)"),
-    ]
-
-    def draw(self, p, r, ctx):
-        th, pr = ctx.theme, self.props
-        self.panel(p, r, th)
-        al = {"left": Qt.AlignmentFlag.AlignLeft, "center": Qt.AlignmentFlag.AlignHCenter,
-              "right": Qt.AlignmentFlag.AlignRight}[pr["align"]] | Qt.AlignmentFlag.AlignVCenter
-        pad = r.height() * 0.25
-        draw_text(p, r.adjusted(pad, 0, -pad, 0), pr["text"], th, r.height() * pr["size"],
-                  QColor(pr["color"]) if pr["color"] else th.text, al, tabular=False)
-
-
-class ImageLayer(Widget):
-    TYPE, NAME = "image", "Image / logo"
-    DEFAULT_SIZE = (200, 120)
-    PROPS = [Prop("path", "file", "", "Image file")]
-
-    def __init__(self, *a, **k):
-        super().__init__(*a, **k)
-        self._img = None
-        self._path = None
-
-    def draw(self, p, r, ctx):
-        path = self.props["path"]
-        if path != self._path:
-            self._path = path
-            self._img = QImage(path) if path and os.path.exists(path) else None
-        if self._img is None or self._img.isNull():
-            if ctx.theme and not path:
-                draw_panel(p, r, ctx.theme, force=True)
-                draw_text(p, r, "IMAGE", ctx.theme, r.height() * 0.25, ctx.theme.text_dim)
-            return
-        iw, ih = self._img.width(), self._img.height()
-        s = min(r.width() / iw, r.height() / ih)
-        tr = QRectF(r.center().x() - iw * s / 2, r.center().y() - ih * s / 2, iw * s, ih * s)
-        p.save()
-        p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
-        p.drawImage(tr, self._img)
-        p.restore()
-
+from .widgets_data import BarGauge, DialGauge, Graph, ValueBox  # noqa: E402
+from .widgets_media import BlurRegion, ImageLayer, TextLabel  # noqa: E402
 
 WIDGET_TYPES = {cls.TYPE: cls for cls in
-                (SpeedDial, ValueBox, BarGauge, Pedals, GCircle, TrackMap, LapTimer, DeltaBar, Graph, Steering,
-                 TextLabel, ImageLayer)}
+                (DialGauge, ValueBox, BarGauge, Graph,
+                 SpeedDial, LapTimer, DeltaBar, TrackMap, GCircle, Pedals, Steering,
+                 TextLabel, ImageLayer, BlurRegion)}
+
+
+def _migrate(d: dict) -> dict:
+    """Upgrade widget JSON written by version 1.0."""
+    t, pr = d.get("type"), dict(d.get("props") or {})
+    if t == "bar" and "range_mode" not in pr:
+        pr["range_mode"] = "fixed" if float(pr.get("max", 0) or 0) > 0 else "auto"
+    if t == "value" and "range_mode" not in pr:
+        pr.setdefault("label", "")
+    if t == "text" and "size_pt" not in pr and "size" in pr:
+        pr["size_pt"] = round(float(pr.pop("size")) * float(d.get("h", 70)) * 0.75, 1)
+    d = dict(d)
+    d["props"] = pr
+    return d
 
 
 def widget_from_json(d: dict) -> Optional[Widget]:
     cls = WIDGET_TYPES.get(d.get("type"))
     if cls is None:
         return None
+    d = _migrate(d)
     return cls(d.get("x", 0), d.get("y", 0), d.get("w"), d.get("h"), d.get("props"), d.get("id"))

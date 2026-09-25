@@ -14,6 +14,8 @@ camera's motion.
 | --- | --- | --- |
 | ![Broadcast theme](docs/screenshots/overlay-broadcast.jpg) | ![Motorsport HUD theme](docs/screenshots/overlay-motorsport-hud.jpg) | ![Minimal theme](docs/screenshots/overlay-minimal.jpg) |
 
+![Custom widgets from any channel, text, image and blur layers](docs/screenshots/custom-widgets.jpg)
+
 <sub>Footage: Formula Student Germany 2026 endurance, Hockenheim. RaceBox Mini plus the car's MF4 CAN log.</sub>
 
 ## Features
@@ -31,10 +33,29 @@ camera's motion.
     A sync-check lane on the timeline shows video motion against the data.
 - **Laps** – from the logger's lap channel or a start/finish gate you place. Lap table, best
   lap, and a live delta to best based on distance.
-- **Widgets** – speed dial, value, bar, throttle/brake, G-force circle with trail, track map
-  with speed-coloured trail, lap timer, delta bar, rolling graph, steering wheel, text,
-  image/logo. Every widget can be dragged, resized and restyled. Channels are picked via roles
-  (`@speed`, `@throttle`, …).
+- **Widgets from any signal** – dial (arc or needle), numeric readout, bar (horizontal, vertical,
+  or centred on zero), and a live plot with up to 4 channels. Each widget has:
+  - *Scale and offset* for unit conversion
+  - *Range* – automatic, or fixed min/max
+  - *Limits* – upper and lower warning limits that recolour the gauge
+  - *Filters* – a zero-phase **low-pass** (cutoff in Hz) and an **outlier filter** (Hampel,
+    threshold in σ over an adjustable window)
+
+  Pick channels in the **Signals** tab: search every channel of every loaded file, then add it as a
+  numeric, bar, dial or plot with one click.
+- **Motorsport gauges** – speed dial, lap timer, delta to best, track map with speed-coloured
+  trail, G-force circle, throttle/brake, steering wheel. Every data widget can use the filters.
+- **Text, images, blur** – text in any installed font, with pt size, colour, outline, shadow,
+  background, spacing and rotation. Images, including transparent PNGs, with rotation and
+  mirroring. Blur or pixelate regions with a rectangle, rounded or ellipse shape, adjustable
+  strength and a hard or soft edge.
+- **Overlay files (`.odvoverlay`)** – save a complete look (widgets, theme, channel mapping) and
+  load it into any project. Widgets whose channels are missing stay in place, marked ⚠. They
+  connect automatically when you add a CSV or MF4 with matching channel names (exact,
+  case-insensitive or loose), even from a different logger or file.
+- **Video orientation** – rotate in 90° steps, mirror horizontally or vertically, and level a
+  tilted horizon with a fine angle (optionally zoomed to fill). Phone rotation metadata is
+  respected. The preview, export and motion sync all use the same orientation.
 - **Themes** – Broadcast, Motorsport HUD, Minimal, with a custom accent colour.
 - **Export** – FFmpeg with automatic NVIDIA NVENC / Intel Quick Sync / AMD AMF detection and an
   x264 fallback. Upscaling (e.g. 720p source → 1080p output for crisper gauges). Transparent
@@ -55,8 +76,8 @@ console window.
 ### Any platform
 
 ```bash
-git clone https://github.com/<your-user>/onboard-datavis.git
-cd onboard-datavis
+git clone https://github.com/j4spre/OnboardDataVis.git
+cd OnboardDataVis
 python -m venv .venv
 # Windows: .venv\Scripts\activate    macOS/Linux: source .venv/bin/activate
 pip install -e .            # or: pip install -r requirements.txt
@@ -73,6 +94,8 @@ onboard-datavis             # or: python -m odv
 4. **Check** – play it back and watch the *Sync check* lane. Fine-tune with `[` / `]` or a sync
    point.
 5. **Layout** – with *✎ Edit* on, drag and resize gauges. Configure them in the *Overlay* panel.
+   Add gauges for any channel from the *Signals* tab, and text, images or blur from the *Insert*
+   menu. Use *Overlay ▸ Save overlay as…* to reuse the look in other sessions.
 6. **Export video…**
 
 Save the project as `.odv` (JSON, paths relative to the project file) to keep the sync and layout.
@@ -100,6 +123,8 @@ Save the project as `.odv` (JSON, paths relative to the project file) to keep th
 | E / H | Toggle layout editing / hide overlay |
 | Ctrl + wheel | Zoom timeline (Shift + wheel pans, Z resets) |
 | Ctrl+S / Ctrl+E | Save / export |
+| Ctrl+T / Ctrl+I / Ctrl+B | Insert text / image / blur region |
+| Ctrl+L / Ctrl+Shift+E | Load / save overlay file |
 
 ## Command line
 
@@ -114,10 +139,10 @@ python -m odv still session.odv 95.0 frame.png
 
 ```
 odv/
-  data/      model (channels, sources, roles), loaders, lap timing + delta
+  data/      model (channels, sources, roles, name matching), loaders, filters, lap timing + delta
   sync.py    timestamp / motion / cross-correlation sync
-  render/    themes, widgets, renderer, FFmpeg export
-  ui/        Qt editor: preview canvas, timeline, panels, dialogs
+  render/    themes, widget base, motorsport / data / media widgets, renderer, FFmpeg export
+  ui/        Qt editor: preview canvas, timeline, data / signals / overlay panels, dialogs
   project.py .odv project file
 tests/       pytest suite with synthetic data (no sample files needed)
 ```
@@ -130,6 +155,7 @@ run a smoke test on a real export.
 - GoPro GPMF parsing for frame-accurate GPS time
 - Audio in the preview, undo/redo
 - Gear indicator / shift lights, lean angle, lap comparison split-screen
+- Text placeholders that show live values, e.g. `{@speed:.0f} km/h`
 - One-click Windows build (PyInstaller)
 
 ## License

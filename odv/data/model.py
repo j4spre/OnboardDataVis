@@ -173,14 +173,32 @@ def split_key(key: str):
     return sid, name
 
 
+def norm_name(name: str) -> str:
+    """Loose channel-name key: 'Speed (km/h)' -> 'speed', 'VCU_Apps-Linear' -> 'vcuappslinear'."""
+    import re
+
+    base = re.sub(r"\s*[\(\[][^\)\]]*[\)\]]\s*$", "", name or "")
+    return re.sub(r"[^a-z0-9]", "", base.lower())
+
+
 class Session:
-    """All data sources plus the role mapping, expressed on the video timeline."""
+    """All data sources plus the role mapping, expressed on the video timeline.
+
+    Channel references are ``"<source id>:<channel name>"`` or a role ``"@speed"``. When the source id
+    is unknown (e.g. an overlay loaded into another project, or data added later) the channel is
+    matched by name across all loaded sources, so widgets reconnect automatically."""
 
     def __init__(self):
         self.sources: List[DataSource] = []
         self.roles: Dict[str, str] = {}  # role -> channel key
         self.listeners: List[Callable[[], None]] = []
         self.laps = None  # set by odv.data.laps.LapModel
+        self._resolve_cache: Dict[str, tuple] = {}
+        self._proc_cache: Dict[tuple, Channel] = {}
+
+    def invalidate(self):
+        self._resolve_cache.clear()
+        self._proc_cache.clear()
 
     # -- sources --------------------------------------------------------
     def source(self, sid: str) -> Optional[DataSource]:
@@ -198,14 +216,17 @@ class Session:
 
     def add_source(self, src: DataSource, auto_roles: bool = True):
         self.sources.append(src)
+        self.invalidate()
         if auto_roles:
             for role, name in src.default_roles().items():
                 if role not in self.roles or self.resolve(self.roles[role])[1] is None:
                     self.roles[role] = channel_key(src.id, name)
+        self.invalidate()
 
     def remove_source(self, sid: str):
         self.sources = [s for s in self.sources if s.id != sid]
-        self.roles = {r: k for r, k in self.roles.items() if split_key(k)[0] != sid}
+        # roles are kept: they re-match by name if matching data is added again
+        self.invalidate()
 
     def all_keys(self) -> List[str]:
         out = []
@@ -213,12 +234,51 @@ class Session:
             out += [channel_key(s.id, n) for n in s.channel_names()]
         return out
 
+    def find_by_name(self, name: str, prefer_sid: Optional[str] = None):
+        """Locate a channel by name in any source: exact, case-insensitive, then loose match."""
+        if not self.sources or not name:
+            return None
+        import re
+
+        pref_base = re.sub(r"\d+$", "", prefer_sid or "")
+        order = sorted(self.sources, key=lambda s: (s.id != prefer_sid,
+                                                     re.sub(r"\d+$", "", s.id) != pref_base))
+        for s in order:
+            if s.has(name):
+                return s, name
+        low = name.lower()
+        for s in order:
+            for n in s.channel_names():
+                if n.lower() == low:
+                    return s, n
+        key = norm_name(name)
+        if key:
+            for s in order:
+                for n in s.channel_names():
+                    if norm_name(n) == key:
+                        return s, n
+        return None
+
     def resolve(self, key: str):
-        sid, name = split_key(key)
-        src = self.source(sid) if sid else None
-        if src is None:
+        if not key:
             return None, None
-        return src, src.get(name)
+        hit = self._resolve_cache.get(key)
+        if hit is None:
+            sid, name = split_key(key)
+            src = self.source(sid) if sid else None
+            if src is not None and src.has(name):
+                hit = (src.id, name)
+            else:
+                found = self.find_by_name(name, sid)
+                hit = (found[0].id, found[1]) if found else ("", "")
+            self._resolve_cache[key] = hit
+        if not hit[0]:
+            return None, None
+        src = self.source(hit[0])
+        return (src, src.get(hit[1])) if src is not None else (None, None)
+
+    def is_resolved(self, ref: str) -> bool:
+        return self.resolve_ref(ref)[1] is not None
 
     def role_key(self, role: str) -> Optional[str]:
         return self.roles.get(role)
@@ -238,11 +298,35 @@ class Session:
         src, ch = self.resolve_ref(ref)
         return ch.unit if ch is not None else ""
 
-    def value(self, ref: str, t_video):
+    def processed(self, ref: str, lowpass_hz: float = 0.0, outlier_k: float = 0.0, outlier_window_s: float = 0.5):
+        """(source, channel) with outlier removal / low-pass applied (cached)."""
         src, ch = self.resolve_ref(ref)
+        if ch is None or not ((lowpass_hz and lowpass_hz > 0) or (outlier_k and outlier_k > 0)):
+            return src, ch
+        key = (src.id, ch.name, id(ch), round(float(lowpass_hz or 0), 4), round(float(outlier_k or 0), 3),
+               round(float(outlier_window_s or 0.5), 3))
+        pc = self._proc_cache.get(key)
+        if pc is None:
+            from .filters import process
+
+            t, v = process(ch.t, ch.v, lowpass_hz or 0.0, outlier_k or 0.0, outlier_window_s or 0.5)
+            pc = Channel(ch.name, t, v, ch.unit, step=ch.step)
+            if len(self._proc_cache) > 64:
+                self._proc_cache.clear()
+            self._proc_cache[key] = pc
+        return src, pc
+
+    def value(self, ref: str, t_video, proc: Optional[dict] = None):
+        if proc:
+            src, ch = self.processed(ref, proc.get("lowpass_hz", 0.0), proc.get("outlier_k", 0.0),
+                                     proc.get("outlier_window_s", 0.5))
+        else:
+            src, ch = self.resolve_ref(ref)
         if ch is None:
             return np.nan if np.isscalar(t_video) else np.full(np.shape(t_video), np.nan)
-        return ch.at(np.asarray(t_video) + src.offset if not np.isscalar(t_video) else t_video + src.offset)
+        if np.isscalar(t_video):
+            return ch.at(t_video + src.offset)
+        return ch.at(np.asarray(t_video, dtype=np.float64) + src.offset)
 
     def channel_for(self, ref: str):
         return self.resolve_ref(ref)

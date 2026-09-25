@@ -147,7 +147,7 @@ def correlate_search(sig_t: np.ndarray, sig_v: np.ndarray, ref_t: np.ndarray, re
 
 def motion_signal(video_path: str, sample_fps: float = 15.0, band=(0.2, 0.55),
                   progress: Optional[Callable[[float], None]] = None,
-                  cancelled: Callable[[], bool] = lambda: False):
+                  cancelled: Callable[[], bool] = lambda: False, orient: Optional[Callable] = None):
     """Horizontal image motion (camera yaw proxy) per sampled frame.
 
     Returns (t, yaw_px_per_s, magnitude)."""
@@ -160,7 +160,6 @@ def motion_signal(video_path: str, sample_fps: float = 15.0, band=(0.2, 0.55),
     dur = float(cont.duration / 1e6) if cont.duration else float(vs.duration * vs.time_base)
     W = 320
     H = int(round(W * vs.codec_context.height / vs.codec_context.width / 2) * 2)
-    y0, y1 = int(band[0] * H), int(band[1] * H)
     prev, prev_t = None, None
     ts, yaw, mag = [], [], []
     next_t = 0.0
@@ -170,7 +169,10 @@ def motion_signal(video_path: str, sample_fps: float = 15.0, band=(0.2, 0.55),
         if frame.time + 1e-6 < next_t:
             continue
         next_t = frame.time + 1.0 / sample_fps
-        g = frame.to_ndarray(format="gray", width=W, height=H)[y0:y1]
+        g = frame.to_ndarray(format="gray", width=W, height=H)
+        if orient is not None:
+            g = orient(g)
+        g = np.ascontiguousarray(g[int(band[0] * g.shape[0]):int(band[1] * g.shape[0])])
         if prev is not None:
             fl = cv2.calcOpticalFlowFarneback(prev, g, None, 0.5, 3, 15, 3, 5, 1.2, 0)
             dt = frame.time - prev_t
@@ -190,15 +192,12 @@ def motion_signal(video_path: str, sample_fps: float = 15.0, band=(0.2, 0.55),
 
 def data_yaw_rate(session: Session, src: DataSource) -> Optional[Tuple[np.ndarray, np.ndarray, str]]:
     """Yaw rate in deg/s from gyro Z, or derived from GPS heading."""
-    key = session.roles.get("yaw_rate")
-    if key and key.startswith(src.id + ":"):
-        ch = src.get(key.split(":", 1)[1])
-        if ch is not None and len(ch) > 20:
-            return ch.t, ch.v, "gyro"
-    lat_k, lon_k = session.roles.get("lat"), session.roles.get("lon")
-    if lat_k and lon_k and lat_k.startswith(src.id + ":"):
-        lat = src.get(lat_k.split(":", 1)[1])
-        lon = src.get(lon_k.split(":", 1)[1])
+    s_yaw, ch = session.resolve_ref("@yaw_rate")
+    if ch is not None and s_yaw is src and len(ch) > 20:
+        return ch.t, ch.v, "gyro"
+    s_lat, lat = session.resolve_ref("@lat")
+    s_lon, lon = session.resolve_ref("@lon")
+    if lat is not None and lon is not None and s_lat is src and s_lon is src:
         if lat is not None and lon is not None:
             t = lat.t
             la, lo = np.radians(lat.v), np.radians(lon.at(t))
@@ -232,11 +231,9 @@ def motion_sync(session: Session, src: DataSource, motion, progress=None) -> Opt
 # ------------------------------------------------------------------ source to source
 
 def speed_channel(session: Session, src: DataSource):
-    key = session.roles.get("speed")
-    if key and key.startswith(src.id + ":"):
-        ch = src.get(key.split(":", 1)[1])
-        if ch is not None:
-            return ch
+    s_sp, ch = session.resolve_ref("@speed")
+    if ch is not None and s_sp is src:
+        return ch
     name = src.default_roles().get("speed")
     if name:
         return src.get(name)

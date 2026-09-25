@@ -194,3 +194,123 @@ def test_sample_racebox_csv():
     lm = LapModel(s)
     assert src.default_roles().get("speed")
     assert lm.best_lap() is not None
+
+
+# ---------------------------------------------------------------------- 1.1 features
+
+def test_filters_outlier_and_lowpass():
+    from odv.data.filters import lowpass, remove_outliers
+
+    t = np.arange(0, 20, 0.01)
+    clean = np.sin(2 * np.pi * 0.5 * t)
+    noisy = clean + 0.3 * np.sin(2 * np.pi * 30 * t)
+    v = noisy.copy()
+    v[[100, 900, 1500]] = [50, -40, 80]
+    fixed = remove_outliers(t, v, k=4, window_s=0.3)
+    assert np.max(np.abs(fixed)) < 2.0
+    tu, lp = lowpass(t, fixed, 3.0)
+    err = np.abs(np.interp(t, tu, lp) - clean)[200:-200]
+    assert err.max() < 0.12  # 30 Hz ripple gone, no phase lag
+
+
+def test_name_matching_and_overlay_roundtrip(tmp_path):
+    from PySide6.QtGui import QGuiApplication
+
+    QGuiApplication.instance() or QGuiApplication([])
+    from odv.data.model import Channel, DataSource
+    from odv.project import Project
+    from odv.render.widgets import BarGauge, DialGauge
+
+    def car(sid):
+        s = DataSource(sid, "car.mf4", kind="mf4")
+        t = np.arange(0, 100, 0.1)
+        s.add(Channel("Motor_Temp", t, 40 + t * 0.1, "degC"))
+        s.meta.update(t_start=0, t_end=100)
+        return s
+
+    a = Project()
+    a.session.add_source(car("mf4"))
+    a.widgets = [DialGauge(10, 10, 200, 200, {"channel": "mf4:Motor_Temp", "lowpass_hz": 1.0})]
+    ov = tmp_path / "look.odvoverlay"
+    a.save_overlay(str(ov))
+
+    b = Project()  # no data yet: widget must survive, unresolved
+    rep = b.load_overlay(str(ov))
+    assert rep["widgets"] == 1 and rep["missing"] == ["mf4:Motor_Temp"]
+    b.session.add_source(car("logger7"))  # different source id, same channel name
+    assert b.missing_channels() == []
+    src, ch = b.session.resolve_ref(b.widgets[0].props["channel"])
+    assert src.id == "logger7"
+    # loose name match: 'motor temp (°C)' -> Motor_Temp
+    assert b.session.find_by_name("motor temp (°C)")[1] == "Motor_Temp"
+    # widget reads filtered data
+    from odv.render.base import RenderContext
+    ctx = RenderContext(b.session, None, None, 50.0)
+    ctx.proc = b.widgets[0].signal_params()
+    assert ctx.val(b.widgets[0].props["channel"]) == pytest.approx(45.0, abs=0.2)
+
+
+def test_video_transform_matches_ffmpeg(tmp_path):
+    import shutil
+    import subprocess
+
+    from PySide6.QtGui import QGuiApplication, QImage
+
+    QGuiApplication.instance() or QGuiApplication([])
+    from odv.render.export import ffmpeg_exe
+    from odv.video import VideoTransform, display_size, ffmpeg_orient_filters, probe, transform_qimage
+
+    exe = ffmpeg_exe()
+    src = str(tmp_path / "t.mp4")
+    rot = str(tmp_path / "rot.mp4")
+    subprocess.run([exe, "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc=s=160x120:d=0.3:r=10",
+                    "-c:v", "mpeg4", "-q:v", "2", src], check=True)
+    r = subprocess.run([exe, "-v", "error", "-y", "-display_rotation", "90", "-i", src, "-c", "copy", rot])
+    path = rot if r.returncode == 0 else src
+    info = probe(path)
+    import av
+
+    c = av.open(path)
+    fr = next(c.decode(c.streams.video[0]))
+    arr = fr.to_ndarray(format="bgra")
+    base = QImage(arr.data, arr.shape[1], arr.shape[0], arr.shape[1] * 4, QImage.Format.Format_ARGB32).copy()
+    for tf in (VideoTransform(), VideoTransform(90), VideoTransform(180, True), VideoTransform(270, False, True)):
+        q = transform_qimage(base, info, tf).convertToFormat(QImage.Format.Format_ARGB32)
+        assert (q.width(), q.height()) == display_size(info, tf)
+        vf = ",".join(ffmpeg_orient_filters(info, tf) or ["null"])
+        out = subprocess.run([exe, "-v", "error", "-noautorotate", "-i", path, "-frames:v", "1", "-vf", vf,
+                              "-f", "rawvideo", "-pix_fmt", "bgra", "-"], capture_output=True).stdout
+        W, H = q.width(), q.height()
+        ff = np.frombuffer(out, np.uint8)[: W * H * 4].reshape(H, W, 4)[..., :3].astype(int)
+        qa = np.frombuffer(bytes(q.constBits()), np.uint8).reshape(H, -1)[:, : W * 4].reshape(H, W, 4)[..., :3]
+        assert np.abs(ff - qa.astype(int)).mean() < 2.0
+
+
+def test_blur_and_media_widgets(tmp_path):
+    from PySide6.QtGui import QColor, QGuiApplication, QImage
+
+    QGuiApplication.instance() or QGuiApplication([])
+    from odv.project import Project
+    from odv.render.renderer import OverlayRenderer
+    from odv.render.widgets import BlurRegion, ImageLayer, TextLabel
+
+    pr = Project()
+    img = QImage(1920, 1080, QImage.Format.Format_ARGB32)
+    img.fill(QColor("black"))
+    from PySide6.QtGui import QPainter
+    p = QPainter(img)
+    for x in range(0, 1920, 40):  # stripes to blur
+        p.fillRect(x, 0, 20, 1080, QColor("white"))
+    p.end()
+    logo = QImage(64, 64, QImage.Format.Format_ARGB32)
+    logo.fill(QColor(255, 0, 0, 128))
+    logo.save(str(tmp_path / "logo.png"))
+    pr.widgets = [BlurRegion(100, 100, 400, 400, {"edge": 0, "strength": 40}),
+                  TextLabel(900, 100, 600, 100, {"text": "Hello", "size_pt": 40}),
+                  ImageLayer(900, 600, 200, 200, {"path": str(tmp_path / "logo.png")})]
+    OverlayRenderer(pr).render_image(img, 0.0)
+    a = np.frombuffer(bytes(img.constBits()), np.uint8).reshape(1080, 1920, 4).astype(int)
+    inside = a[200:400, 200:400, 2]
+    outside = a[600:800, 200:400, 2]
+    assert inside.std() < 0.3 * outside.std()  # stripes smoothed only inside the region
+    assert a[700, 1000, 2] > 100 and a[700, 1000, 0] < 150  # translucent red logo over the stripes

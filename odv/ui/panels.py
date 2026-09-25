@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Side panels: data & sync, channel roles, overlay widgets + inspector, laps."""
+"""Side panels: data & sync (incl. video orientation), channel roles, laps."""
 from __future__ import annotations
 
 import os
@@ -148,6 +148,7 @@ class DataPanel(QWidget):
     timestampRequested = Signal(str)
     addDataRequested = Signal()
     openVideoRequested = Signal()
+    videoTransformChanged = Signal()
 
     def __init__(self, project, parent=None):
         super().__init__(parent)
@@ -162,6 +163,49 @@ class DataPanel(QWidget):
         bv = QPushButton("Open video…")
         bv.clicked.connect(self.openVideoRequested)
         vl.addWidget(bv)
+        # orientation
+        orow = QHBoxLayout()
+        orow.setSpacing(3)
+        self.rot_l = QPushButton("⟲ 90°")
+        self.rot_l.setToolTip("Rotate the video 90° counter-clockwise")
+        self.rot_l.clicked.connect(lambda: self._rotate(-90))
+        self.rot_r = QPushButton("⟳ 90°")
+        self.rot_r.setToolTip("Rotate the video 90° clockwise")
+        self.rot_r.clicked.connect(lambda: self._rotate(90))
+        self.flip_h = QPushButton("⇋ Flip H")
+        self.flip_h.setCheckable(True)
+        self.flip_h.setToolTip("Mirror left/right (e.g. footage from a mirrored mount)")
+        self.flip_h.toggled.connect(self._flip)
+        self.flip_v = QPushButton("⇵ Flip V")
+        self.flip_v.setCheckable(True)
+        self.flip_v.setToolTip("Mirror top/bottom (camera mounted upside down: use Rotate 180° instead)")
+        self.flip_v.toggled.connect(self._flip)
+        for b in (self.rot_l, self.rot_r, self.flip_h, self.flip_v):
+            b.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            orow.addWidget(b)
+        vl.addLayout(orow)
+        lrow = QHBoxLayout()
+        lrow.addWidget(QLabel("Level"))
+        self.angle = QDoubleSpinBox()
+        self.angle.setRange(-45, 45)
+        self.angle.setDecimals(1)
+        self.angle.setSingleStep(0.5)
+        self.angle.setSuffix(" °")
+        self.angle.setKeyboardTracking(False)
+        self.angle.setToolTip("Fine rotation to straighten a tilted horizon (clockwise positive)")
+        self.angle.valueChanged.connect(self._angle)
+        lrow.addWidget(self.angle, 1)
+        self.fill = QCheckBox("Zoom to fill")
+        self.fill.setToolTip("Enlarge slightly so a levelled video has no black corners")
+        self.fill.toggled.connect(self._angle)
+        lrow.addWidget(self.fill)
+        rst = QToolButton()
+        rst.setText("Reset")
+        rst.clicked.connect(self._reset_tf)
+        lrow.addWidget(rst)
+        vl.addLayout(lrow)
+        self.tf_label = muted("")
+        vl.addWidget(self.tf_label)
         outer.addWidget(vid)
 
         hb = QHBoxLayout()
@@ -229,6 +273,7 @@ class DataPanel(QWidget):
                                      f"{fmt_tc(v.duration)} · {ct}")
         else:
             self.video_label.setText("No video")
+        self._show_tf()
         if not pr.session.sources:
             self.cards_lay.addWidget(muted("No data yet. Add a RaceBox export, a CSV, an MF4 (CAN/ECU log), "
                                            "a VBO or a GPX file."))
@@ -242,6 +287,52 @@ class DataPanel(QWidget):
     def refresh(self):
         for c in self.cards.values():
             c.refresh()
+
+    # ---------------------------------------------------------------- orientation
+    def _show_tf(self):
+        tf = self.project.video_tf
+        for wdg, val in ((self.flip_h, tf.flip_h), (self.flip_v, tf.flip_v), (self.angle, tf.angle),
+                         (self.fill, tf.fill)):
+            wdg.blockSignals(True)
+            if isinstance(wdg, QDoubleSpinBox):
+                wdg.setValue(val)
+            else:
+                wdg.setChecked(bool(val))
+            wdg.blockSignals(False)
+        enabled = self.project.video is not None
+        for wdg in (self.rot_l, self.rot_r, self.flip_h, self.flip_v, self.angle, self.fill):
+            wdg.setEnabled(enabled)
+        if enabled:
+            w, h = self.project.display_size()
+            parts = []
+            if self.project.video.rotation:
+                parts.append(f"file says rotate {self.project.video.rotation}°")
+            if tf.rot90:
+                parts.append(f"rotated {tf.rot90}°")
+            if tf.flip_h or tf.flip_v:
+                parts.append("mirrored " + "+".join(x for x, f in (("H", tf.flip_h), ("V", tf.flip_v)) if f))
+            if tf.angle:
+                parts.append(f"levelled {tf.angle:+.1f}°")
+            self.tf_label.setText(f"Output {w}×{h}" + (" · " + ", ".join(parts) if parts else ""))
+        else:
+            self.tf_label.setText("")
+
+    def _apply_tf(self, **kw):
+        self.project.set_video_transform(**kw)
+        self._show_tf()
+        self.videoTransformChanged.emit()
+
+    def _rotate(self, d):
+        self._apply_tf(rot90=(self.project.video_tf.rot90 + d) % 360)
+
+    def _flip(self):
+        self._apply_tf(flip_h=self.flip_h.isChecked(), flip_v=self.flip_v.isChecked())
+
+    def _angle(self):
+        self._apply_tf(angle=self.angle.value(), fill=self.fill.isChecked())
+
+    def _reset_tf(self):
+        self._apply_tf(rot90=0, flip_h=False, flip_v=False, angle=0.0, fill=True)
 
     def refresh_laps(self):
         self.lap_combo.clear()
@@ -377,345 +468,7 @@ class RolesPanel(QWidget):
 
 # ====================================================================== widgets + inspector
 
-class ColorButton(QPushButton):
-    colorChanged = Signal(str)
-
-    def __init__(self, value=""):
-        super().__init__()
-        self.value = value
-        self.setFixedHeight(26)
-        self.clicked.connect(self._pick)
-        self._show()
-
-    def _show(self):
-        if self.value:
-            self.setText(self.value)
-            c = QColor(self.value)
-            fg = "black" if c.lightness() > 140 else "white"
-            self.setStyleSheet(f"background:{self.value}; color:{fg};")
-        else:
-            self.setText("theme default")
-            self.setStyleSheet("")
-
-    def _pick(self):
-        m = QMenu(self)
-        m.addAction("Choose…", self._choose)
-        m.addAction("Use theme default", lambda: self._set(""))
-        m.exec(self.mapToGlobal(self.rect().bottomLeft()))
-
-    def _choose(self):
-        c = QColorDialog.getColor(QColor(self.value or "#ff3b30"), self, "Colour",
-                                  QColorDialog.ColorDialogOption.ShowAlphaChannel)
-        if c.isValid():
-            self._set(c.name(QColor.NameFormat.HexArgb) if c.alpha() < 255 else c.name())
-
-    def _set(self, v):
-        self.value = v
-        self._show()
-        self.colorChanged.emit(v)
-
-
-class Inspector(QWidget):
-    changed = Signal()
-
-    def __init__(self, project, parent=None):
-        super().__init__(parent)
-        self.project = project
-        self.widget: Optional[Widget] = None
-        self.form = QFormLayout(self)
-        self.form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
-        self.geo = {}
-
-    def set_widget(self, w: Optional[Widget]):
-        self.widget = w
-        while self.form.rowCount():
-            self.form.removeRow(0)
-        self.geo = {}
-        if w is None:
-            self.form.addRow(muted("Select a widget on the preview (Edit layout on) or in the list above."))
-            return
-        t = QLabel(w.NAME)
-        t.setStyleSheet("font-weight:600; font-size:11pt")
-        self.form.addRow(t)
-        g = QGridLayout()
-        for i, k in enumerate(("x", "y", "w", "h")):
-            sp = QSpinBox()
-            sp.setRange(-4000, 8000)
-            sp.setValue(int(getattr(w, k)))
-            sp.setPrefix(f"{k.upper()} ")
-            sp.valueChanged.connect(partial(self._geo, k))
-            g.addWidget(sp, i // 2, i % 2)
-            self.geo[k] = sp
-        gw = QWidget()
-        gw.setLayout(g)
-        self.form.addRow("Position", gw)
-        keys = [""] + ["@" + r for r in ROLES] + self.project.session.all_keys()
-        for prop in w.all_props():
-            val = w.props.get(prop.name, prop.default)
-            if prop.kind == "channel":
-                ed = QComboBox()
-                ed.setEditable(True)
-                ed.addItems(keys)
-                comp = QCompleter(keys, ed)
-                comp.setFilterMode(Qt.MatchFlag.MatchContains)
-                comp.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
-                ed.setCompleter(comp)
-                ed.setCurrentText(val)
-                ed.setMinimumContentsLength(14)
-                ed.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
-                ed.currentTextChanged.connect(partial(self._set, prop.name))
-            elif prop.kind == "bool":
-                ed = QCheckBox()
-                ed.setChecked(bool(val))
-                ed.toggled.connect(partial(self._set, prop.name))
-            elif prop.kind == "float":
-                ed = QDoubleSpinBox()
-                ed.setRange(prop.minv, prop.maxv)
-                ed.setDecimals(3 if abs(prop.default) < 10 else 1)
-                ed.setSingleStep(0.1 if abs(prop.maxv - prop.minv) < 20 else 1)
-                ed.setValue(float(val))
-                ed.valueChanged.connect(partial(self._set, prop.name))
-            elif prop.kind == "int":
-                ed = QSpinBox()
-                ed.setRange(int(max(prop.minv, -1e6)), int(min(prop.maxv, 1e6)))
-                ed.setValue(int(val))
-                ed.valueChanged.connect(partial(self._set, prop.name))
-            elif prop.kind == "choice":
-                ed = QComboBox()
-                ed.addItems(prop.options or [])
-                ed.setCurrentText(str(val))
-                ed.currentTextChanged.connect(partial(self._set, prop.name))
-            elif prop.kind == "color":
-                ed = ColorButton(val)
-                ed.colorChanged.connect(partial(self._set, prop.name))
-            elif prop.kind == "file":
-                ed = QPushButton(os.path.basename(val) if val else "Choose file…")
-                ed.clicked.connect(partial(self._file, prop.name, ed))
-            else:
-                ed = QLineEdit(str(val))
-                ed.textChanged.connect(partial(self._set, prop.name))
-            self.form.addRow(prop.label or prop.name, ed)
-
-    def refresh_geometry(self):
-        if self.widget is None:
-            return
-        for k, sp in self.geo.items():
-            sp.blockSignals(True)
-            sp.setValue(int(getattr(self.widget, k)))
-            sp.blockSignals(False)
-
-    def _geo(self, k, v):
-        if self.widget is not None:
-            setattr(self.widget, k, float(v))
-            self.project.dirty = True
-            self.changed.emit()
-
-    def _set(self, name, v):
-        if self.widget is not None:
-            self.widget.props[name] = v
-            self.project.dirty = True
-            self.changed.emit()
-
-    def _file(self, name, btn):
-        path, _ = QFileDialog.getOpenFileName(self, "Image", "", "Images (*.png *.jpg *.jpeg *.svg *.webp)")
-        if path:
-            btn.setText(os.path.basename(path))
-            self._set(name, path)
-
-
-class WidgetsPanel(QWidget):
-    changed = Signal()
-    selectRequested = Signal(object)
-
-    def __init__(self, project, parent=None):
-        super().__init__(parent)
-        self.project = project
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(6, 6, 6, 6)
-        style = QGroupBox("Style")
-        sf = QFormLayout(style)
-        self.theme = QComboBox()
-        self.theme.addItems(list(THEMES.keys()))
-        self.theme.setCurrentText(project.theme)
-        self.theme.currentTextChanged.connect(self._theme)
-        sf.addRow("Theme", self.theme)
-        self.accent = ColorButton(project.accent)
-        self.accent.colorChanged.connect(self._accent)
-        sf.addRow("Accent", self.accent)
-        self.unit = QComboBox()
-        self.unit.addItems(["km/h", "mph", "m/s"])
-        self.unit.setCurrentText(project.speed_unit)
-        self.unit.currentTextChanged.connect(self._unit)
-        sf.addRow("Speed unit", self.unit)
-        lay.addWidget(style)
-
-        bar = QHBoxLayout()
-        add = QPushButton("＋ Add widget")
-        add.setObjectName("primary")
-        m = QMenu(add)
-        for t, cls in WIDGET_TYPES.items():
-            m.addAction(cls.NAME, partial(self._add, t))
-        add.setMenu(m)
-        bar.addWidget(add)
-        for txt, tip, fn in (("▲", "Bring forward", partial(self._move, 1)), ("▼", "Send backward", partial(self._move, -1)),
-                             ("⧉", "Duplicate", self._dup), ("✕", "Delete", self._del)):
-            b = QToolButton()
-            b.setText(txt)
-            b.setToolTip(tip)
-            b.clicked.connect(fn)
-            bar.addWidget(b)
-        reset = QToolButton()
-        reset.setText("Reset layout")
-        reset.clicked.connect(self._reset)
-        bar.addWidget(reset)
-        lay.addLayout(bar)
-        self.list = QListWidget()
-        self.list.setMaximumHeight(170)
-        self.list.currentRowChanged.connect(self._row)
-        self.list.itemChanged.connect(self._item_changed)
-        lay.addWidget(self.list)
-        self.inspector = Inspector(project)
-        self.inspector.changed.connect(self.changed)
-        sc = QScrollArea()
-        sc.setWidgetResizable(True)
-        sc.setWidget(self.inspector)
-        lay.addWidget(sc, 1)
-        self.rebuild()
-
-    def set_project(self, project):
-        self.project = project
-        self.inspector.project = project
-        self.theme.setCurrentText(project.theme)
-        self.unit.setCurrentText(project.speed_unit)
-        self.accent._set(project.accent) if self.accent.value != project.accent else None
-        self.rebuild()
-
-    def rebuild(self, select: Optional[Widget] = None):
-        self.list.blockSignals(True)
-        self.list.clear()
-        for w in reversed(self.project.widgets):
-            it = QListWidgetItem(w.NAME + (f" – {w.props.get('label') or w.props.get('channel', '')}"
-                                           if w.TYPE in ("value", "bar") else ""))
-            it.setFlags(it.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-            it.setCheckState(Qt.CheckState.Checked if w.props.get("visible", True) else Qt.CheckState.Unchecked)
-            it.setData(Qt.ItemDataRole.UserRole, w.id)
-            self.list.addItem(it)
-        self.list.blockSignals(False)
-        if select is not None:
-            self.show_selection(select)
-        else:
-            self.inspector.set_widget(None)
-
-    def show_selection(self, w: Optional[Widget]):
-        self.list.blockSignals(True)
-        if w is None:
-            self.list.clearSelection()
-            self.list.setCurrentRow(-1)
-        else:
-            for i in range(self.list.count()):
-                if self.list.item(i).data(Qt.ItemDataRole.UserRole) == w.id:
-                    self.list.setCurrentRow(i)
-        self.list.blockSignals(False)
-        if w is not self.inspector.widget:
-            self.inspector.set_widget(w)
-
-    def _widget_by_id(self, wid):
-        return next((w for w in self.project.widgets if w.id == wid), None)
-
-    def _row(self, row):
-        it = self.list.item(row)
-        w = self._widget_by_id(it.data(Qt.ItemDataRole.UserRole)) if it else None
-        self.inspector.set_widget(w)
-        self.selectRequested.emit(w)
-
-    def _item_changed(self, it):
-        w = self._widget_by_id(it.data(Qt.ItemDataRole.UserRole))
-        if w is not None:
-            w.props["visible"] = it.checkState() == Qt.CheckState.Checked
-            self.changed.emit()
-
-    def _add(self, t):
-        cls = WIDGET_TYPES[t]
-        W, H = cls.DEFAULT_SIZE
-        w = cls(1920 / 2 - W / 2, self.project.ref_height / 2 - H / 2)
-        if t == "speed_dial":
-            w.props["unit"] = self.project.speed_unit
-        self.project.widgets.append(w)
-        self.project.dirty = True
-        self.rebuild(w)
-        self.selectRequested.emit(w)
-        self.changed.emit()
-
-    def _current(self):
-        return self.inspector.widget
-
-    def _move(self, d):
-        w = self._current()
-        if w is None:
-            return
-        ws = self.project.widgets
-        i = ws.index(w)
-        j = max(0, min(len(ws) - 1, i + d))
-        ws.insert(j, ws.pop(i))
-        self.rebuild(w)
-        self.changed.emit()
-
-    def _dup(self):
-        w = self._current()
-        if w is None:
-            return
-        from ..render.widgets import widget_from_json
-        import copy
-
-        d = copy.deepcopy(w.to_json())
-        d.pop("id")
-        d["x"] += 30
-        d["y"] += 30
-        nw = widget_from_json(d)
-        self.project.widgets.append(nw)
-        self.rebuild(nw)
-        self.selectRequested.emit(nw)
-        self.changed.emit()
-
-    def _del(self):
-        w = self._current()
-        if w is None:
-            return
-        self.project.widgets.remove(w)
-        self.project.dirty = True
-        self.rebuild()
-        self.selectRequested.emit(None)
-        self.changed.emit()
-
-    def _reset(self):
-        self.project.default_layout()
-        for w in self.project.widgets:
-            if w.TYPE == "speed_dial":
-                w.props["unit"] = self.project.speed_unit
-        self.rebuild()
-        self.selectRequested.emit(None)
-        self.changed.emit()
-
-    def _theme(self, name):
-        self.project.theme = name
-        self.project.dirty = True
-        self.changed.emit()
-
-    def _accent(self, v):
-        self.project.accent = v
-        self.project.dirty = True
-        self.changed.emit()
-
-    def _unit(self, u):
-        self.project.speed_unit = u
-        for w in self.project.widgets:
-            if w.TYPE == "speed_dial" and w.props.get("unit") in SPEED_UNITS:
-                w.props["unit"] = u
-            if w.TYPE == "value" and w.props.get("unit") in SPEED_UNITS:
-                w.props["unit"] = u
-        self.project.dirty = True
-        self.inspector.set_widget(self.inspector.widget)
-        self.changed.emit()
+from .overlay_panel import ColorButton, Inspector, WidgetsPanel  # noqa: E402,F401
 
 
 # ====================================================================== laps

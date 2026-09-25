@@ -12,7 +12,7 @@ from PySide6.QtWidgets import QMenu, QSizePolicy, QWidget
 
 from ..render.renderer import REF_WIDTH, OverlayRenderer
 from ..render.widgets import Widget, widget_from_json
-from ..video import VideoReader
+from ..video import VideoReader, transform_qimage
 
 HANDLE = 9  # px, screen space
 SNAP = 10  # ref units
@@ -70,7 +70,11 @@ class PreviewCanvas(QWidget):
                 ft, arr = res
                 h, w = arr.shape[:2]
                 self._arr = arr  # keep buffer alive
-                self.frame = QImage(arr.data, w, h, w * 4, QImage.Format.Format_ARGB32)
+                img = QImage(arr.data, w, h, w * 4, QImage.Format.Format_ARGB32)
+                if self.project.video_tf.is_identity() and not self.project.video.rotation:
+                    self.frame = img
+                else:
+                    self.frame = transform_qimage(img, self.project.video, self.project.video_tf)
                 self.frame_t = ft
             else:
                 self.frame_t = self.t
@@ -80,7 +84,8 @@ class PreviewCanvas(QWidget):
 
     # ------------------------------------------------------------------ geometry
     def video_rect(self) -> QRectF:
-        ar = (self.project.video.width / self.project.video.height) if self.project.video else 16 / 9
+        dw, dh = self.project.display_size()
+        ar = dw / dh if self.project.video else 16 / 9
         W, H = self.width() - 16, self.height() - 16
         if W / H > ar:
             h = H
@@ -120,7 +125,7 @@ class PreviewCanvas(QWidget):
             p.save()
             p.translate(vr.topLeft())
             p.setClipRect(QRectF(0, 0, vr.width(), vr.height()))
-            self.renderer.paint(p, vr.width(), self.frame_t)
+            self.renderer.paint(p, vr.width(), self.frame_t, frame=self.frame, edit_mode=self.edit_mode)
             p.restore()
         if self.edit_mode:
             self._paint_edit(p)

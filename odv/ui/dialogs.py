@@ -49,15 +49,17 @@ class ExportDialog(QDialog):
         form.addRow("Encoder", self.enc)
 
         self.res = QComboBox()
-        ar = v.width / v.height
-        opts = [("Source", v.width, v.height)]
-        for h in (720, 1080, 1440, 2160):
-            w = int(round(h * ar / 2) * 2)
-            if (w, h) != (v.width, v.height):
-                opts.append((f"{h}p", w, h))
+        dw, dh = pr.display_size()
+        short = min(dw, dh)
+        opts = [("Source", dw, dh)]
+        for target in (720, 1080, 1440, 2160):
+            k = target / short
+            w, h = int(round(dw * k / 2) * 2), int(round(dh * k / 2) * 2)
+            if (w, h) != (dw, dh):
+                opts.append((f"{target}p", w, h))
         for lab, w, h in opts:
             self.res.addItem(f"{lab}  ({w}×{h})", (w, h))
-        if v.height < 1080:
+        if short < 1080:
             self.res.setCurrentIndex(next((i for i, o in enumerate(opts) if o[0] == "1080p"), 0))
         form.addRow("Resolution", self.res)
         form.addRow("", self._note("Overlay graphics are drawn at the output resolution, so upscaling a 720p "

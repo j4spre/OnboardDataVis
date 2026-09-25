@@ -57,8 +57,9 @@ def cmd_render(a):
     from .render.export import ExportSettings, Exporter
 
     pr = Project.load(a.project)
-    W = a.width or pr.video.width
-    H = a.height or int(round(W * pr.video.height / pr.video.width / 2) * 2)
+    dw, dh = pr.display_size()
+    W = a.width or dw
+    H = a.height or int(round(W * dh / dw / 2) * 2)
     st = ExportSettings(a.out, W, H, a.start if a.start is not None else pr.trim_in,
                         a.end if a.end is not None else pr.out_point, a.encoder, a.quality,
                         transparent=a.transparent or "")
@@ -77,16 +78,22 @@ def cmd_render(a):
 
 def cmd_still(a):
     _headless_app()
+    from PySide6.QtCore import Qt
     from PySide6.QtGui import QImage, QPainter
     from .project import Project
     from .render.renderer import OverlayRenderer
     from .video import VideoReader
 
     pr = Project.load(a.project)
-    rd = VideoReader(pr.video.path, max_width=a.width or pr.video.width)
+    from .video import transform_qimage
+
+    rd = VideoReader(pr.video.path, max_width=max(pr.video.width, pr.video.height))
     ft, arr = rd.frame_at(a.time)
     h, w = arr.shape[:2]
     img = QImage(arr.data, w, h, w * 4, QImage.Format.Format_ARGB32).copy()
+    img = transform_qimage(img, pr.video, pr.video_tf).convertToFormat(QImage.Format.Format_ARGB32)
+    if a.width:
+        img = img.scaledToWidth(a.width, Qt.TransformationMode.SmoothTransformation)
     OverlayRenderer(pr).render_image(img, ft)
     img.save(a.out)
     print("saved", a.out)

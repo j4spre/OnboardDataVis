@@ -21,6 +21,7 @@ from ..render.theme import load_fonts
 from .canvas import PreviewCanvas
 from .dialogs import CsvImportDialog, ExportDialog
 from .panels import DataPanel, LapsPanel, RolesPanel, WidgetsPanel
+from .signals_panel import SignalsPanel
 from .style import apply_dark
 from .timeline import Timeline, fmt_tc
 from .workers import Job, start_job
@@ -30,9 +31,10 @@ DATA_FILTER = ("Telemetry (*.csv *.txt *.tsv *.mf4 *.mdf *.dat *.vbo *.gpx);;Rac
 VIDEO_FILTER = "Video (*.mp4 *.mov *.m4v *.avi *.mkv *.MP4 *.MOV *.insv *.360);;All files (*)"
 
 
-def motion_cache_path(video_path: str) -> str:
+def motion_cache_path(video_path: str, tf=None) -> str:
     st = os.stat(video_path)
-    h = hashlib.sha1(f"{os.path.abspath(video_path)}|{st.st_size}|{int(st.st_mtime)}".encode()).hexdigest()[:16]
+    o = f"{tf.rot90}|{tf.flip_h}|{tf.flip_v}" if tf is not None else "0|False|False"
+    h = hashlib.sha1(f"{os.path.abspath(video_path)}|{st.st_size}|{int(st.st_mtime)}|{o}".encode()).hexdigest()[:16]
     d = os.path.join(tempfile.gettempdir(), "onboard_datavis_cache")
     os.makedirs(d, exist_ok=True)
     return os.path.join(d, f"motion_{h}.npz")
@@ -127,6 +129,10 @@ class MainWindow(QMainWindow):
         self.data_panel.timestampRequested.connect(self.run_timestamp_sync)
         self.data_panel.addDataRequested.connect(self.add_data)
         self.data_panel.openVideoRequested.connect(self.open_video)
+        self.data_panel.videoTransformChanged.connect(self._video_tf_changed)
+        self.signals_panel = SignalsPanel(pr)
+        self.signals_panel.createRequested.connect(self._create_from_signal)
+        self.signals_panel.addToPlotRequested.connect(self._add_to_plot)
         self.roles_panel = RolesPanel(pr)
         self.roles_panel.rolesChanged.connect(self._roles_changed)
         self.laps_panel = LapsPanel(pr)
@@ -135,11 +141,13 @@ class MainWindow(QMainWindow):
         self.widgets_panel = WidgetsPanel(pr)
         self.widgets_panel.changed.connect(self._widgets_changed)
         self.widgets_panel.selectRequested.connect(self._panel_select)
+        self.widgets_panel.overlayLoaded.connect(self._overlay_loaded)
 
         left = QTabWidget()
         left.addTab(self.data_panel, "Data && Sync")
         left.addTab(self.laps_panel, "Laps")
-        left.addTab(self.roles_panel, "Channels")
+        left.addTab(self.signals_panel, "Signals")
+        left.addTab(self.roles_panel, "Roles")
         d1 = QDockWidget("Project", self)
         d1.setObjectName("dock_project")
         d1.setWidget(left)
@@ -198,6 +206,27 @@ class MainWindow(QMainWindow):
         act(sm, "Data −1 frame", lambda: self.nudge(-1), "[")
         act(sm, "Data +0.1 s", lambda: self.nudge(0, 0.1), "Shift+]")
         act(sm, "Data −0.1 s", lambda: self.nudge(0, -0.1), "Shift+[")
+        im = mb.addMenu("&Insert")
+        for t, label in (("value", "Numeric value"), ("bar", "Bar"), ("dial", "Dial gauge"), ("graph", "Live plot")):
+            act(im, label, lambda _=False, t=t: self.widgets_panel.add_widget(t))
+        im.addSeparator()
+        act(im, "Text", lambda: self.widgets_panel.add_widget("text"), "Ctrl+T")
+        act(im, "Image…", self.widgets_panel.insert_image, "Ctrl+I")
+        act(im, "Blur region", lambda: self.widgets_panel.add_widget("blur"), "Ctrl+B")
+        act(im, "Pixelate region", lambda: self.widgets_panel.add_widget("blur", {"mode": "pixelate", "edge": 0}))
+        im.addSeparator()
+        sub = im.addMenu("Motorsport gauge")
+        from ..render.widgets import WIDGET_TYPES as _WT
+
+        for t, cls in _WT.items():
+            if cls.CATEGORY == "Motorsport":
+                act(sub, cls.NAME, lambda _=False, t=t: self.widgets_panel.add_widget(t))
+        om = mb.addMenu("O&verlay")
+        act(om, "Save overlay as…", self.widgets_panel.save_overlay, "Ctrl+Shift+E")
+        act(om, "Load overlay (replace)…", lambda: self.widgets_panel.load_overlay(True), "Ctrl+L")
+        act(om, "Add widgets from overlay file…", lambda: self.widgets_panel.load_overlay(False))
+        om.addSeparator()
+        act(om, "Reset to default layout", self.widgets_panel._reset)
         vm = mb.addMenu("&View")
         act(vm, "Toggle layout editing", lambda: self.edit_btn.click(), "E")
         act(vm, "Toggle overlay", lambda: self.ov_btn.click(), "H")
@@ -216,7 +245,7 @@ class MainWindow(QMainWindow):
         self.timeline.project = pr
         self.timeline.motion = (self.motion[0], self.motion[1]) if self.motion else None
         self.timeline.reset_view()
-        for pnl in (self.data_panel, self.roles_panel, self.laps_panel, self.widgets_panel):
+        for pnl in (self.data_panel, self.roles_panel, self.laps_panel, self.widgets_panel, self.signals_panel):
             pnl.set_project(pr)
         self._update_title()
         self.seek(self.canvas.t)
@@ -229,7 +258,7 @@ class MainWindow(QMainWindow):
         self.motion = None
         if self.project.video:
             try:
-                cp = motion_cache_path(self.project.video.path)
+                cp = motion_cache_path(self.project.video.path, self.project.video_tf)
                 if os.path.exists(cp):
                     z = np.load(cp)
                     self.motion = (z["t"], z["yaw"], z["mag"])
@@ -326,6 +355,10 @@ class MainWindow(QMainWindow):
         self._update_title()
 
     def _sources_changed(self):
+        self.project.session.invalidate()
+        self.signals_panel.rebuild()
+        self.widgets_panel.refresh_titles()
+        self.widgets_panel.inspector.refresh_channels()
         self.roles_panel.rebuild()
         self.laps_panel.rebuild()
         self.data_panel.refresh_laps()
@@ -334,12 +367,52 @@ class MainWindow(QMainWindow):
         self._update_title()
 
     def _roles_changed(self):
+        self.widgets_panel.refresh_titles()
         self.laps_panel.rebuild()
         self.data_panel.refresh_laps()
         self.timeline.invalidate()
         self.canvas.renderer = self.canvas.renderer.__class__(self.project)
         self.canvas.update()
         self._update_title()
+
+    def _video_tf_changed(self):
+        self._load_cached_motion()
+        self.canvas.set_time(self.canvas.t)
+        self.widgets_panel.inspector.refresh_geometry()
+        self.canvas.update()
+        self._update_title()
+
+    def _overlay_loaded(self):
+        self.roles_panel.rebuild()
+        self.laps_panel.rebuild()
+        self.data_panel.refresh_laps()
+        self.timeline.invalidate()
+        self.canvas.renderer = self.canvas.renderer.__class__(self.project)
+        self.canvas.selected = None
+        self.canvas.update()
+        self._update_title()
+
+    def _create_from_signal(self, t, props):
+        self.widgets_panel.add_widget(t, props)
+        self.edit_btn.setChecked(True)
+        self._toggle_edit()
+
+    def _add_to_plot(self, key):
+        w = self.widgets_panel.inspector.widget
+        if w is None or w.TYPE != "graph":
+            self.widgets_panel.add_widget("graph", {"ch1": key, "ch2": "", "ch3": "", "ch4": "",
+                                                    "label": key.split(":", 1)[-1]})
+            return
+        for i in range(1, 5):
+            if not w.props.get(f"ch{i}"):
+                w.props[f"ch{i}"] = key
+                break
+        else:
+            w.props["ch4"] = key
+        self.project.dirty = True
+        self.widgets_panel.inspector.set_widget(w)
+        self.widgets_panel.refresh_titles()
+        self.canvas.update()
 
     def _laps_changed(self):
         self.data_panel.refresh_laps()
@@ -528,10 +601,13 @@ class MainWindow(QMainWindow):
             mo = self.motion
             if mo is None:
                 job.progress.emit(0.0, "Analysing video motion…")
+                from ..video import transform_array
+
+                vinfo, vtf = pr.video, pr.video_tf
                 mo = sync.motion_signal(pr.video.path, progress=lambda f: job.progress.emit(f * 0.9, "Analysing video motion…"),
-                                        cancelled=job.cancelled)
+                                        cancelled=job.cancelled, orient=lambda g: transform_array(g, vinfo, vtf))
                 try:
-                    np.savez(motion_cache_path(pr.video.path), t=mo[0], yaw=mo[1], mag=mo[2])
+                    np.savez(motion_cache_path(pr.video.path, vtf), t=mo[0], yaw=mo[1], mag=mo[2])
                 except Exception:
                     pass
             job.progress.emit(0.92, "Matching with data…")
@@ -635,7 +711,9 @@ class MainWindow(QMainWindow):
         QMessageBox.information(self, "Keyboard shortcuts", (
             "Space  play / pause\n←/→  previous / next frame\nShift+←/→  ±1 s\nHome / End  start / end\n"
             "I / O  trim in / out\n[ / ]  shift data −/+ 1 frame\nShift+[ / ]  shift data −/+ 0.1 s\n"
-            "E  toggle layout editing\nH  hide overlay\nZ  reset timeline zoom (Ctrl+wheel zooms)\n\n"
+            "E  toggle layout editing\nH  hide overlay\nZ  reset timeline zoom (Ctrl+wheel zooms)\n"
+            "Ctrl+T / Ctrl+I / Ctrl+B  insert text / image / blur\n"
+            "Ctrl+L / Ctrl+Shift+E  load / save overlay file\n\n"
             "Layout editing: drag to move, corner handles to resize (Shift keeps aspect), arrows nudge "
             "(Shift = 10 px), Alt disables snapping, Delete removes, right-click for more."))
 
