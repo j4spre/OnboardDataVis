@@ -44,10 +44,12 @@ camera's motion.
   Pick channels in the **Signals** tab: search every channel of every loaded file, then add it as a
   numeric, bar, dial or plot with one click.
 - **Motorsport gauges** – speed dial, lap timer, delta to best, track map with speed-coloured
-  trail, G-force circle, throttle/brake, steering wheel. Every data widget can use the filters.
+  trail, G-force circle, throttle/brake, steering wheel. The steering wheel can use any image of
+  your own wheel, rotated by the steering signal. Every data widget can use the filters.
 - **Text, images, blur** – text in any installed font, with pt size, colour, outline, shadow,
   background, spacing and rotation. Images, including transparent PNGs, with rotation and
-  mirroring. Blur or pixelate regions with a rectangle, rounded or ellipse shape, adjustable
+  mirroring. **Animated GIFs** (and animated WebP) play in sync with the video, with adjustable
+  speed, looping and start time. Blur or pixelate regions with a rectangle, rounded or ellipse shape, adjustable
   strength and a hard or soft edge.
 - **Overlay files (`.odvoverlay`)** – save a complete look (widgets, theme, channel mapping) and
   load it into any project. Widgets whose channels are missing stay in place, marked ⚠. They

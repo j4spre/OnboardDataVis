@@ -17,13 +17,18 @@
 - **Text layer**: any installed font, pt size (at 1080p), bold/italic, colour, outline, shadow,
   background, letter and line spacing, alignment, rotation, multi-line text.
 - **Image layer**: transparent PNGs and other formats, keep aspect, rotation, mirroring,
-  opacity. Available as *Insert ▸ Image…*.
+  opacity. Available as *Insert ▸ Image…*. **Animated GIFs** and animated WebP are timed by the
+  video clock, so they play the same in preview and export. Speed, loop and start time are
+  adjustable.
+- **Custom steering wheel image**: the steering widget can rotate any image (e.g. a photo of the
+  car's wheel), with size and angle offset.
 - **Blur / pixelate regions**: rectangle, rounded or ellipse shape; adjustable strength; hard or
   soft edge. Drawn beneath the gauges, onto the video.
 - **Video orientation**: 90° rotation, horizontal/vertical mirroring, fine levelling with
   zoom-to-fill. Honours phone rotation metadata. The preview, export and motion sync match exactly.
 - Menus *Insert* and *Overlay*. The inspector groups settings into collapsible sections and
   greys out settings that don't apply.
+- Live plot history is sampled on a time-anchored grid, so it scrolls without wiggling during playback.
 - Export resolutions follow the rotated output (portrait video gives portrait presets).
 
 ## 1.0.0 – 2026-09-24

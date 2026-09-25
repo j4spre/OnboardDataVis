@@ -113,8 +113,114 @@ class TextLabel(Widget):
         p.restore()
 
 
+class AnimatedImage:
+    """All frames of an image file (GIF, animated WebP/PNG or a still image) with their timing.
+
+    Frames are picked from the *video* time, so an animation plays identically in the preview
+    and in every export, independent of rendering speed."""
+
+    MAX_BYTES = 600 * 1024 * 1024  # decoded-frame budget; larger animations are scaled down
+
+    def __init__(self, path: str):
+        from PySide6.QtGui import QImageReader
+
+        self.path = path
+        self.frames = []
+        self.ends = []  # cumulative end time of each frame in ms
+        self.loop_count = -1
+        rd = QImageReader(path)
+        rd.setAutoTransform(True)
+        n_hint = max(1, rd.imageCount()) if rd.supportsAnimation() else 1
+        size = rd.size()
+        scale = 1.0
+        if size.isValid() and size.width() > 0:
+            need = n_hint * size.width() * size.height() * 4
+            if need > self.MAX_BYTES:
+                scale = (self.MAX_BYTES / need) ** 0.5
+                rd.setScaledSize(size * scale)
+        t = 0
+        while True:
+            img = rd.read()
+            if img.isNull():
+                break
+            delay = rd.nextImageDelay() if rd.supportsAnimation() else 0
+            if delay <= 10:  # browsers treat 0-10 ms GIF delays as 100 ms
+                delay = 100
+            self.frames.append(img.convertToFormat(QImage.Format.Format_ARGB32_Premultiplied))
+            t += delay
+            self.ends.append(t)
+            if not rd.supportsAnimation() or not rd.canRead():
+                break
+        try:
+            self.loop_count = rd.loopCount()
+        except Exception:
+            self.loop_count = -1
+        self.total_ms = t if len(self.frames) > 1 else 0
+
+    @property
+    def animated(self) -> bool:
+        return len(self.frames) > 1
+
+    def first(self):
+        return self.frames[0] if self.frames else None
+
+    def frame_at(self, seconds: float, loop: bool = True):
+        if not self.frames:
+            return None
+        if not self.animated or seconds <= 0:
+            return self.frames[0]
+        ms = seconds * 1000.0
+        if loop:
+            ms = ms % self.total_ms
+        elif ms >= self.total_ms:
+            return self.frames[-1]
+        import bisect
+
+        return self.frames[min(bisect.bisect_right(self.ends, ms), len(self.frames) - 1)]
+
+
+_IMAGE_CACHE = {}
+
+
+def load_image(path: str):
+    """Cached :class:`AnimatedImage` (reloads when the file changes). None if missing/unreadable."""
+    if not path or not os.path.exists(path):
+        return None
+    try:
+        key = (os.path.abspath(path), os.path.getmtime(path), os.path.getsize(path))
+    except OSError:
+        return None
+    img = _IMAGE_CACHE.get(key)
+    if img is None:
+        img = AnimatedImage(path)
+        if not img.frames:
+            return None
+        if len(_IMAGE_CACHE) > 32:
+            _IMAGE_CACHE.clear()
+        _IMAGE_CACHE[key] = img
+    return img
+
+
+def draw_image_fitted(p, img, r: QRectF, keep_aspect=True, rotation=0.0, flip_h=False, flip_v=False, scale=1.0):
+    iw, ih = img.width(), img.height()
+    if keep_aspect:
+        s = min(r.width() / iw, r.height() / ih) * scale
+        tw, th_ = iw * s, ih * s
+    else:
+        tw, th_ = r.width() * scale, r.height() * scale
+    p.save()
+    p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+    c = r.center()
+    p.translate(c)
+    if rotation:
+        p.rotate(float(rotation))
+    p.scale(-1 if flip_h else 1, -1 if flip_v else 1)
+    p.drawImage(QRectF(-tw / 2, -th_ / 2, tw, th_), img)
+    p.restore()
+
+
 class ImageLayer(Widget):
-    TYPE, NAME = "image", "Image / logo"
+    TYPE, NAME = "image", "Image / logo / GIF"
     CATEGORY = "Media"
     USES_DATA = False
     DEFAULT_SIZE = (300, 200)
@@ -124,27 +230,26 @@ class ImageLayer(Widget):
         Prop("rotation", "float", 0.0, "Rotation (deg)", minv=-360, maxv=360, group="Image", decimals=1),
         Prop("flip_h", "bool", False, "Mirror horizontally", group="Image"),
         Prop("flip_v", "bool", False, "Mirror vertically", group="Image"),
+        Prop("animate", "bool", True, "Play animation (GIF / WebP)", group="Animation"),
+        Prop("speed", "float", 1.0, "Speed", minv=0.05, maxv=20, group="Animation", decimals=2),
+        Prop("loop", "bool", True, "Loop", group="Animation"),
+        Prop("start", "float", 0.0, "Starts at video time (s)", minv=-1e6, maxv=1e6, group="Animation",
+             decimals=2),
     ]
     DEFAULT_PROPS = {"panel": False}
 
-    def __init__(self, *a, **k):
-        super().__init__(*a, **k)
-        self._img = None
-        self._path = None
-
-    def image(self):
-        path = self.props.get("path", "")
-        if path != self._path:
-            self._path = path
-            img = QImage(path) if path and os.path.exists(path) else None
-            if img is not None and not img.isNull():
-                img = img.convertToFormat(QImage.Format.Format_ARGB32_Premultiplied)
-            self._img = img
-        return self._img
+    def image(self, t: float = 0.0):
+        src = load_image(self.props.get("path", ""))
+        if src is None:
+            return None
+        pr = self.props
+        if not (src.animated and pr.get("animate", True)):
+            return src.first()
+        return src.frame_at((t - float(pr.get("start", 0.0))) * float(pr.get("speed", 1.0)), bool(pr.get("loop", True)))
 
     def draw(self, p, r, ctx):
         pr = self.props
-        img = self.image()
+        img = self.image(ctx.t)
         if pr.get("panel"):
             draw_panel(p, r, ctx.theme)
         if img is None or img.isNull():
@@ -157,21 +262,8 @@ class ImageLayer(Widget):
                 draw_text(p, r, "IMAGE" if not pr.get("path") else "IMAGE NOT FOUND", ctx.theme,
                           min(r.height() * 0.2, 40), ctx.theme.text_dim, tabular=False)
             return
-        iw, ih = img.width(), img.height()
-        if pr.get("keep_aspect", True):
-            s = min(r.width() / iw, r.height() / ih)
-            tw, th_ = iw * s, ih * s
-        else:
-            tw, th_ = r.width(), r.height()
-        p.save()
-        p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
-        c = r.center()
-        p.translate(c)
-        if pr.get("rotation"):
-            p.rotate(float(pr["rotation"]))
-        p.scale(-1 if pr.get("flip_h") else 1, -1 if pr.get("flip_v") else 1)
-        p.drawImage(QRectF(-tw / 2, -th_ / 2, tw, th_), img)
-        p.restore()
+        draw_image_fitted(p, img, r, pr.get("keep_aspect", True), pr.get("rotation", 0.0), pr.get("flip_h"),
+                          pr.get("flip_v"))
 
 
 class BlurRegion(Widget):

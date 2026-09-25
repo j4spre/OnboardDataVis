@@ -314,3 +314,51 @@ def test_blur_and_media_widgets(tmp_path):
     outside = a[600:800, 200:400, 2]
     assert inside.std() < 0.3 * outside.std()  # stripes smoothed only inside the region
     assert a[700, 1000, 2] > 100 and a[700, 1000, 0] < 150  # translucent red logo over the stripes
+
+
+def test_animated_gif_and_custom_steering_image(tmp_path):
+    from PIL import Image
+
+    from PySide6.QtGui import QColor, QGuiApplication, QImage
+
+    QGuiApplication.instance() or QGuiApplication([])
+    from odv.project import Project
+    from odv.render.renderer import OverlayRenderer
+    from odv.render.widgets import ImageLayer, Steering
+    from odv.render.widgets_media import load_image
+
+    frames = [Image.new("RGBA", (40, 40), c) for c in ((255, 0, 0, 255), (0, 255, 0, 255), (0, 0, 255, 255))]
+    gif = str(tmp_path / "a.gif")
+    frames[0].save(gif, save_all=True, append_images=frames[1:], duration=[100, 200, 300], loop=0)
+    a = load_image(gif)
+    assert len(a.frames) == 3 and a.total_ms == 600
+    pick = lambda t, loop=True: a.frames.index(a.frame_at(t, loop))  # noqa: E731
+    assert [pick(0.05), pick(0.15), pick(0.35), pick(0.65), pick(5.0, False)] == [0, 1, 2, 0, 2]
+
+    pr = Project()
+    w = ImageLayer(0, 0, 400, 400, {"path": gif, "start": 10.0})
+    pr.widgets = [w]
+
+    def colour_at(t):
+        img = QImage(1920, 1080, QImage.Format.Format_ARGB32)
+        img.fill(QColor("black"))
+        OverlayRenderer(pr).render_image(img, t)
+        return img.pixelColor(200, 200).name()
+
+    assert colour_at(5.0) == "#ff0000"  # before start: first frame
+    assert colour_at(10.15) == "#00ff00"
+    assert colour_at(10.4) == "#0000ff"
+
+    wheel = str(tmp_path / "wheel.png")
+    im = Image.new("RGBA", (100, 100), (0, 0, 0, 0))
+    im.paste((255, 255, 255, 255), (45, 0, 55, 50))  # vertical bar pointing up
+    im.save(wheel)
+    st = Steering(0, 0, 400, 400, {"image": wheel, "channel": "", "show_value": False, "panel": False,
+                                   "image_offset": 90.0, "image_size": 1.0})
+    pr.widgets = [st]
+    img = QImage(1920, 1080, QImage.Format.Format_ARGB32)
+    img.fill(QColor("black"))
+    OverlayRenderer(pr).render_image(img, 0.0)
+    cy = 200 - int(400 * 0.04)
+    assert img.pixelColor(300, cy).lightness() > 200  # rotated 90°: bar now points right
+    assert img.pixelColor(200, cy - 120).lightness() < 50

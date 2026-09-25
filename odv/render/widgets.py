@@ -515,9 +515,14 @@ class Steering(Widget):
     TYPE, NAME = "steering", "Steering wheel"
     DEFAULT_SIZE = (200, 200)
     PROPS = [
-        Prop("channel", "channel", "@steering", "Steering channel"),
-        Prop("scale", "float", 1.0, "Degrees per unit", minv=-100, maxv=100),
-        Prop("show_value", "bool", True, "Show angle"),
+        Prop("channel", "channel", "@steering", "Steering channel", group="Steering"),
+        Prop("scale", "float", 1.0, "Degrees per unit", minv=-100, maxv=100, group="Steering"),
+        Prop("show_value", "bool", True, "Show angle", group="Steering"),
+        Prop("image", "file", "", "Custom wheel image (blank = built-in)", group="Custom image"),
+        Prop("image_size", "float", 0.8, "Image size (fraction)", minv=0.05, maxv=2.0, group="Custom image",
+             decimals=2),
+        Prop("image_offset", "float", 0.0, "Image angle offset (deg)", minv=-360, maxv=360, group="Custom image",
+             decimals=1),
     ]
 
     def draw(self, p, r, ctx):
@@ -533,6 +538,16 @@ class Steering(Widget):
         v = ctx.val(pr["channel"])
         ang = (v if np.isfinite(v) else 0.0) * pr["scale"]
         acc = self.accent(th)
+        custom = load_image(pr.get("image", "")) if pr.get("image") else None
+        if custom is not None:
+            size = side * float(pr.get("image_size", 0.8))
+            box = QRectF(c.x() - size / 2, c.y() - side * 0.04 - size / 2, size, size)
+            draw_image_fitted(p, custom.first(), box, True, ang + float(pr.get("image_offset", 0.0)))
+            if pr["show_value"]:
+                draw_text(p, QRectF(c.x() - side / 2, c.y() + side * 0.33, side, side * 0.12),
+                          (f"{round(ang) + 0:+d}°" if round(ang) != 0 else "0°") if np.isfinite(v) else "--", th,
+                          side * 0.1, th.text)
+            return
         p.save()
         p.translate(c.x(), c.y() - side * 0.04)
         p.rotate(ang)
@@ -565,7 +580,7 @@ class Steering(Widget):
 # ------------------------------------------------------------------ registry
 
 from .widgets_data import BarGauge, DialGauge, Graph, ValueBox  # noqa: E402
-from .widgets_media import BlurRegion, ImageLayer, TextLabel  # noqa: E402
+from .widgets_media import BlurRegion, ImageLayer, TextLabel, draw_image_fitted, load_image  # noqa: E402
 
 WIDGET_TYPES = {cls.TYPE: cls for cls in
                 (DialGauge, ValueBox, BarGauge, Graph,

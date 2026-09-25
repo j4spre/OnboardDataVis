@@ -19,7 +19,7 @@ from ..render.theme import THEMES
 from ..render.widgets import SPEED_UNITS, WIDGET_TYPES, Widget, widget_from_json
 
 OVERLAY_FILTER = "Onboard DataVis overlay (*.odvoverlay);;All files (*)"
-IMAGE_FILTER = "Images (*.png *.jpg *.jpeg *.webp *.bmp *.gif *.svg *.tif *.tiff);;All files (*)"
+IMAGE_FILTER = "Images and GIFs (*.png *.gif *.webp *.jpg *.jpeg *.bmp *.svg *.tif *.tiff);;All files (*)"
 
 # prop -> (other prop, predicate) : editor is enabled only when predicate(other value) is true
 DEPENDS = {
